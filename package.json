@@ -1,0 +1,20 @@
+{
+  "name": "opencode-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that lets Claude Code pick an OpenCode model and delegate jobs to the opencode CLI",
+  "type": "module",
+  "bin": {
+    "opencode-mcp": "./src/index.js"
+  },
+  "main": "./src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.24.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
