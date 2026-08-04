@@ -145,8 +145,11 @@ npm install
 ## Register with Claude Code
 
 ```bash
-claude mcp add opencode --scope user -- node /Users/alejoarueocampo/Developer/opencode-mcp/src/index.js
+claude mcp add opencode --scope user -- node /path/to/opencode-mcp/src/index.js
 ```
+
+Replace `/path/to/opencode-mcp` with wherever you cloned this repo (e.g. run
+`pwd` from inside it to get the absolute path).
 
 Takes effect in new Claude Code sessions (an already-running session won't pick up
 newly registered servers).
