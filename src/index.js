@@ -6,6 +6,7 @@ import { listProviders, listModels, modelInfo } from "./catalog.js";
 import { startJob, getJob, listJobs, cancelJob, waitForJob, jobSummary } from "./jobs.js";
 import { TIER_NAMES, DEFAULT_TIER, getTierMap, getTierMapMeta, saveTierMap, resolveModel, isStale } from "./tiers.js";
 import { computeTierMap, toTierEntry } from "./rank.js";
+import { readUsageLog, summarizeUsage } from "./usage.js";
 
 /**
  * A model can score well on the leaderboard and still be unusable right now
@@ -232,12 +233,13 @@ server.tool(
     try {
       const resolved = resolveModel({ model, tier });
       const effectiveVariant = model ? (variant ?? null) : resolved.variant;
+      const effectiveTier = model ? null : (tier ?? DEFAULT_TIER);
       const prompt = style === "verbose" ? rest.prompt : rest.prompt + HANDOFF_SUFFIX;
-      const jobId = startJob({ ...rest, prompt, model: resolved.model, variant: effectiveVariant });
+      const jobId = startJob({ ...rest, prompt, model: resolved.model, variant: effectiveVariant, tier: effectiveTier });
       return ok({
         jobId,
         status: "running",
-        tier: model ? null : (tier ?? DEFAULT_TIER),
+        tier: effectiveTier,
         model: resolved.model,
         variant: effectiveVariant,
         style: style ?? "handoff",
@@ -276,6 +278,29 @@ server.tool(
   {},
   async () => {
     return ok({ jobs: listJobs().map(jobSummary) });
+  }
+);
+
+server.tool(
+  "opencode_usage_stats",
+  "Aggregate stats across every job this MCP server has ever delegated (persisted at ~/.local/share/opencode-mcp/usage-log.jsonl, survives across sessions/processes — unlike opencode_list_jobs, which only knows this process's in-memory jobs). Reports total tokens, total response characters, and total OpenCode list-price cost per model/tier. `cost` is what the same tokens would have cost pay-per-token — under the Go subscription (flat-rate) or Zen (free) it's $0 actually charged, so this total IS the savings from delegating instead of paying per-token, not a comparison to Claude/Anthropic pricing (this tool has no way to know what the equivalent work would cost in a different model's tokenizer). Pass `sinceHours` to scope to recent jobs only.",
+  {
+    sinceHours: z
+      .number()
+      .optional()
+      .describe("Only include jobs finished in the last N hours. Default: all recorded history."),
+  },
+  async ({ sinceHours }) => {
+    try {
+      let records = readUsageLog();
+      if (sinceHours) {
+        const cutoff = Date.now() - sinceHours * 60 * 60 * 1000;
+        records = records.filter((r) => (r.finishedAt ?? 0) >= cutoff);
+      }
+      return ok(summarizeUsage(records));
+    } catch (e) {
+      return err(String(e.message ?? e));
+    }
   }
 );
 

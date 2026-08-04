@@ -4,6 +4,20 @@ MCP server that lets Claude Code pick an [OpenCode](https://opencode.ai) model a
 delegate jobs to the `opencode` CLI (which must already be installed and authenticated:
 `opencode auth login`).
 
+## Intended use case
+
+This exists so a Claude Code session can offload work that doesn't need Claude's own
+reasoning to a cheap/free model instead, without spending Claude tokens on it — code
+review passes, exploratory bug hunts, well-scoped implementation from a written spec,
+or any "have someone else look at this" request that doesn't name a specific Anthropic
+model. It is **not** a way to run Claude itself more cheaply, and it's not meant for
+tasks that genuinely need Claude-level reasoning (architecture decisions, ambiguous
+requirements, anything where a wrong answer is costly) — those should stay on Claude.
+The tier system (`low`/`mid`/`high`/`max`, see below) exists specifically so the caller
+never has to know or care which OpenCode model is currently cheapest-yet-good-enough;
+it just asks for an intelligence level and gets whatever the data says best fits it
+today.
+
 ## Tools
 
 - `opencode_check_go_status` — confirms the OpenCode Go credential is configured and lists its current model lineup. Pass `probe:true` to actually ping the mid/high/max tier models (costs a little time/tokens — don't do this routinely).
@@ -11,6 +25,7 @@ delegate jobs to the `opencode` CLI (which must already be installed and authent
 - `opencode_start_job` — send a prompt/task to a `tier` (low/mid/high/max) or an explicit `model`+`variant`, in a given directory. Returns a `jobId` immediately (non-blocking).
 - `opencode_job_status` — poll a job; pass `waitMs` to block until it finishes.
 - `opencode_list_jobs` — list all jobs started this server session.
+- `opencode_usage_stats` — aggregate tokens/cost/response-chars across *every* job this server has ever delegated (persisted, survives across sessions/processes — unlike `opencode_list_jobs`). See "Usage tracking" below.
 - `opencode_cancel_job` — kill a running job.
 - `opencode_list_providers` — configured credentials (e.g. OpenCode Zen, OpenCode Go, OpenRouter).
 - `opencode_list_models` — list `provider/model` ids, optionally filtered by provider. Only needed when a job requires a model outside the tier map.
@@ -99,6 +114,27 @@ the tier for one-off cases outside the map.
 - `opencode-go/*` — included in the OpenCode Go subscription. Some entries can be
   slow, region-restricted, or hang depending on OpenCode's backend that day —
   `opencode_cancel_job` exists for exactly that.
+
+## Usage tracking (`src/usage.js`)
+
+Every job, on completion (success or failure), appends one line to
+`~/.local/share/opencode-mcp/usage-log.jsonl` — outside the repo, machine-local,
+grows forever, same convention as opencode's own `~/.local/share/opencode`. Each
+record has tokens, list-price cost, prompt/response character counts, tier, model,
+and duration. `opencode_usage_stats` reads it back and aggregates totals + a
+per-model breakdown; pass `sinceHours` to scope to recent activity only.
+
+`cost` is OpenCode's own list price for the tokens used — under the Go subscription
+(flat-rate) or Zen (free tier) the dollars actually charged is $0 regardless, so the
+aggregated total **is** the savings from delegating instead of paying per-token. It
+is **not** a comparison to Claude/Anthropic API pricing — there's no reliable way to
+know what equivalent work would have cost in a different model's tokenizer, so this
+tool doesn't claim to measure that.
+
+This log is separate from (and complements) OpenCode's own `opencode stats
+--models`, which aggregates *all* opencode usage on the machine regardless of what
+started it — use that for the full-machine picture, use `opencode_usage_stats` to
+scope specifically to what this MCP server delegated.
 
 ## Install
 

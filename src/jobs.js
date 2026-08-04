@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { recordUsage } from "./usage.js";
 
 /** @type {Map<string, Job>} */
 const jobs = new Map();
@@ -109,6 +110,7 @@ export function startJob(opts) {
     prompt: opts.prompt,
     model: opts.model,
     variant: opts.variant,
+    tier: opts.tier,
     agent: opts.agent,
     dir: opts.dir,
     sessionId: null,
@@ -138,12 +140,14 @@ export function startJob(opts) {
     if (job.status === "running") {
       job.status = code === 0 && !job.errorMessage ? "completed" : "failed";
     }
+    recordUsage(job, assembledText(job).length);
     job.events.emit("done");
   });
   child.on("error", (err) => {
     job.errorMessage = err.message;
     job.status = "failed";
     job.finishedAt = Date.now();
+    recordUsage(job, assembledText(job).length);
     job.events.emit("done");
   });
 
@@ -207,6 +211,7 @@ export function jobSummary(job) {
     status: job.status,
     model: job.model,
     variant: job.variant,
+    tier: job.tier,
     agent: job.agent,
     dir: job.dir,
     sessionId: job.sessionId,
