@@ -25,6 +25,22 @@ coding agent (Claude Code or otherwise) with these tools connected, follow this:
   calls and zero tokens. Only call it when you specifically need the ranking
   recomputed right now.
 
+## Jobs never "ping back" — you will not be notified when one finishes
+
+There is no push channel from this server to your conversation. Do not call
+`opencode_start_job` without `waitMs`, then move on assuming you'll be told when
+it's done — you won't be, ever, by any mechanism. This is unlike native
+`run_in_background: true` Bash/Agent tasks, which the harness itself tracks and
+notifies you about; that's a harness-specific feature, not something arbitrary
+MCP servers get. Two correct patterns:
+
+- Default to passing `waitMs` (up to 540000/9min) on `opencode_start_job` so the
+  call blocks and returns the full result directly — this is right for most jobs.
+- Only omit `waitMs` when you deliberately want fire-and-forget because you have
+  other work to do first; in that case YOU are responsible for calling
+  `opencode_job_status({ jobId })` yourself later. If you forget, nothing will
+  remind you.
+
 ## The tier map is data, not a hand-picked guess
 
 `low`/`mid`/`high`/`max` are computed (`src/rank.js`) by cross-referencing every

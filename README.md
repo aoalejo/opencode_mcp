@@ -22,8 +22,8 @@ today.
 
 - `opencode_check_go_status` — confirms the OpenCode Go credential is configured and lists its current model lineup. Pass `probe:true` to actually ping the mid/high/max tier models (costs a little time/tokens — don't do this routinely).
 - `opencode_refresh_tiers` — recompute the low/mid/high/max tier map from live data (see "Model tiers" below). On-demand only, not routine.
-- `opencode_start_job` — send a prompt/task to a `tier` (low/mid/high/max) or an explicit `model`+`variant`, in a given directory. Returns a `jobId` immediately (non-blocking).
-- `opencode_job_status` — poll a job; pass `waitMs` to block until it finishes.
+- `opencode_start_job` — send a prompt/task to a `tier` (low/mid/high/max) or an explicit `model`+`variant`, in a given directory. Pass `waitMs` to block until it finishes and get the full result back in this same call (recommended — see "No push notifications" below); omit it for fire-and-forget (returns just a `jobId`).
+- `opencode_job_status` — check on a job started earlier; pass `waitMs` to block until it finishes.
 - `opencode_list_jobs` — list all jobs started this server session.
 - `opencode_usage_stats` — aggregate tokens/cost/response-chars across *every* job this server has ever delegated (persisted, survives across sessions/processes — unlike `opencode_list_jobs`). See "Usage tracking" below.
 - `opencode_cancel_job` — kill a running job.
@@ -34,6 +34,29 @@ today.
 Jobs shell out to `opencode run --format json`, parsing its newline-delimited JSON
 event stream (`text`, `step_finish`, `error`) to assemble the final response text,
 token usage, and cost as the process runs.
+
+## No push notifications — jobs don't "ping back" when done
+
+MCP tool calls are strictly request/response: this server has no way to interrupt
+a Claude Code conversation on its own when a background job finishes. This is
+*not* like Claude Code's native `run_in_background: true` for Bash/Agent, where
+the harness itself pushes a notification the instant the task completes — that
+mechanism is specific to the harness's own process tracking and doesn't extend to
+arbitrary MCP servers. `jobs.js`'s internal `EventEmitter` ("done") only resolves
+a call that's *actively* `await`-ing it (`waitForJob`); it can't reach into a
+conversation that already moved on.
+
+Two ways to actually get a result, neither of which involves waiting for a ping
+that will never arrive:
+
+- **Block on `waitMs`** (recommended for most jobs): pass `waitMs` to
+  `opencode_start_job` (or a follow-up `opencode_job_status`) — up to 540000ms
+  (9 min) — and the call itself won't return until the job finishes, with the
+  full result (text, tokens, cost) in the same response.
+- **Fire-and-forget + manual follow-up**: omit `waitMs` to get just a `jobId`
+  back immediately, do other work, then call `opencode_job_status({ jobId })`
+  yourself later. There is no notification to wait for — if you don't check
+  back, the result just sits there until you do (or the server process exits).
 
 ## Clean hand-off output, not a transcript
 

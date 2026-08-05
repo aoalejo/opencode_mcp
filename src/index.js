@@ -50,15 +50,13 @@ function flagInheritedTiers(tiers) {
 async function refreshTierMap() {
   const result = await computeTierMap();
   const tiers = {};
-  const verification = {};
   for (const name of TIER_NAMES) {
     const { entry, verified } = await validateTierPick(name, result.bands[name]);
-    tiers[name] = entry;
-    verification[name] = verified;
+    tiers[name] = { ...entry, verified };
   }
   flagInheritedTiers(tiers);
   saveTierMap({ ...result, tiers });
-  return { tiers, verification, unmatched: result.unmatched, matchedCount: result.candidates.length, computedAt: result.computedAt };
+  return { tiers, unmatched: result.unmatched, matchedCount: result.candidates.length, computedAt: result.computedAt };
 }
 
 /**
@@ -192,9 +190,18 @@ server.tool(
 
 server.tool(
   "opencode_start_job",
-  "Send a job (a prompt/task) to OpenCode to work on. Pick a `tier` (low/mid/high/max) instead of a specific model name — tiers are data-driven (see opencode_refresh_tiers): each is the best-scoring model on the WebDev/code arena leaderboard within its cost band on the OpenCode Go subscription (flat-rate, no marginal cost). Default to the lowest tier that can plausibly do the job; only reach for `max` when the task clearly needs the deepest reasoning available. Runs in the background — returns a jobId immediately; poll it with opencode_job_status. Pass an explicit `model` instead of `tier` only when you specifically need something outside the tier map (see opencode_list_models). Output defaults to a clean hand-off (final result only, no narrated process) — set style:\"verbose\" only if you actually want to see the model's exploration/reasoning (e.g. debugging why a job did something unexpected).",
+  "Send a job (a prompt/task) to OpenCode to work on. Pick a `tier` (low/mid/high/max) instead of a specific model name — tiers are data-driven (see opencode_refresh_tiers): each is the best-scoring model on the WebDev/code arena leaderboard within its cost band on the OpenCode Go subscription (flat-rate, no marginal cost). Default to the lowest tier that can plausibly do the job; only reach for `max` when the task clearly needs the deepest reasoning available. Pass an explicit `model` instead of `tier` only when you specifically need something outside the tier map (see opencode_list_models). Output defaults to a clean hand-off (final result only, no narrated process) — set style:\"verbose\" only if you actually want to see the model's exploration/reasoning (e.g. debugging why a job did something unexpected).\n\nIMPORTANT — there is no push notification when a job finishes: MCP tool calls are strictly request/response, this server cannot interrupt the conversation on its own, and nothing resembling the native run_in_background task-notification exists here. Pass `waitMs` (recommended for most jobs — up to 540000ms/9min) to block this single call until the job actually finishes and get the full result back directly. Omit `waitMs` only when you deliberately want fire-and-forget (returns just a jobId immediately) and will follow up yourself later with opencode_job_status — never assume you'll be told when it's done.",
   {
     prompt: z.string().describe("The task/message to send to opencode"),
+    waitMs: z
+      .number()
+      .int()
+      .min(0)
+      .max(540000)
+      .optional()
+      .describe(
+        "Block this call until the job finishes or this many ms elapse (max 540000 = 9 min), returning the full result (text, tokens, cost) instead of just a jobId. Default 0: return immediately without waiting (fire-and-forget — you must poll opencode_job_status yourself, there is no notification when it's done)."
+      ),
     tier: z
       .enum(TIER_NAMES)
       .optional()
@@ -228,7 +235,7 @@ server.tool(
         "Auto-approve tool permissions opencode would otherwise pause for (DANGEROUS: lets it edit/run things unattended). Default false."
       ),
   },
-  async ({ tier, model, variant, style, ...rest }) => {
+  async ({ tier, model, variant, style, waitMs, ...rest }) => {
     maybeAutoRefreshTiers();
     try {
       const resolved = resolveModel({ model, tier });
@@ -236,6 +243,12 @@ server.tool(
       const effectiveTier = model ? null : (tier ?? DEFAULT_TIER);
       const prompt = style === "verbose" ? rest.prompt : rest.prompt + HANDOFF_SUFFIX;
       const jobId = startJob({ ...rest, prompt, model: resolved.model, variant: effectiveVariant, tier: effectiveTier });
+
+      if (waitMs) {
+        await waitForJob(jobId, waitMs);
+        return ok(jobSummary(getJob(jobId)));
+      }
+
       return ok({
         jobId,
         status: "running",
