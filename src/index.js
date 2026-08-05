@@ -8,6 +8,13 @@ import { TIER_NAMES, DEFAULT_TIER, getTierMap, getTierMapMeta, saveTierMap, reso
 import { computeTierMap, toTierEntry } from "./rank.js";
 import { readUsageLog, summarizeUsage } from "./usage.js";
 
+// Reasoning-heavy variants (max/xhigh) can legitimately take over a minute to
+// answer even a 1-word prompt — observed 2026-08-05: kimi-k3/max timed out at
+// 20s (job still "running", not failed) and got wrongly treated as
+// unreachable, demoting it below a worse-scoring model. This is a one-time
+// refresh operation, not a hot path, so a generous timeout costs nothing.
+const PROBE_TIMEOUT_MS = 90000;
+
 /**
  * A model can score well on the leaderboard and still be unusable right now
  * (observed: region-locked models return a 403 with no output). Probe each
@@ -18,11 +25,15 @@ import { readUsageLog, summarizeUsage } from "./usage.js";
 async function validateTierPick(name, band) {
   for (const candidate of band) {
     const jobId = startJob({ prompt: "Reply with exactly: OK", model: candidate.model, variant: candidate.variant });
-    await waitForJob(jobId, 20000);
+    await waitForJob(jobId, PROBE_TIMEOUT_MS);
     const s = jobSummary(getJob(jobId));
     if (s.status === "completed") {
       return { entry: toTierEntry(name, candidate), verified: true };
     }
+    // Still running after the timeout (as opposed to a hard failure like a
+    // region-lock 403) — don't leave it as an orphaned background process
+    // while we move on to the next candidate.
+    if (s.status === "running") cancelJob(jobId);
   }
   // Whole band failed to respond — fall back to its top pick anyway (best
   // information available) but flag it clearly rather than hiding the issue.

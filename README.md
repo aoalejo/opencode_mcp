@@ -106,7 +106,14 @@ built by `computeTierMap()` (`src/rank.js`):
    which otherwise would have won `low`+`mid`), fall through to the next-best
    candidate in the same pool instead of saving a pick that would silently
    fail every job. A tier that exhausts its whole pool without success still
-   gets saved (best-effort) but flagged `verified: false`.
+   gets saved (best-effort) but flagged `verified: false`. Probes wait up to
+   `PROBE_TIMEOUT_MS` (90s, `index.js`) — reasoning-heavy variants like
+   `kimi-k3/max` can genuinely take 30-60s to answer even a 1-word prompt
+   (observed 2026-08-05: a 20s timeout treated it as "still running" =
+   unreachable and wrongly demoted it below a worse-scoring model; this is a
+   one-time refresh, not a hot path, so a generous timeout costs nothing). A
+   probe that times out gets cancelled rather than left as an orphaned
+   background process.
 5. Flag a tier `inherited: true` (with `inheritedFrom: "<cheaper tier>"`) when
    its final winner is the same model+variant as a cheaper tier's — i.e. the
    collapse in step 3 actually happened, post-validation. This is informational
