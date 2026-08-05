@@ -4,48 +4,26 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { listProviders, listModels, modelInfo } from "./catalog.js";
 import { startJob, getJob, listJobs, cancelJob, waitForJob, jobSummary } from "./jobs.js";
-import { TIER_NAMES, DEFAULT_TIER, getTierMap, getTierMapMeta, saveTierMap, resolveModel, isStale } from "./tiers.js";
-import { computeTierMap, toTierEntry } from "./rank.js";
+import {
+  TIER_NAMES,
+  DEFAULT_TIER,
+  getTierMap,
+  getTierMapMeta,
+  saveTierMap,
+  resolveModel,
+  isStale,
+  getBlocklist,
+  blockModel,
+  unblockModel,
+  listBlocked,
+} from "./tiers.js";
+import { computeTierMap } from "./rank.js";
 import { readUsageLog, summarizeUsage } from "./usage.js";
-
-// Reasoning-heavy variants (max/xhigh) can legitimately take over a minute to
-// answer even a 1-word prompt — observed 2026-08-05: kimi-k3/max timed out at
-// 20s (job still "running", not failed) and got wrongly treated as
-// unreachable, demoting it below a worse-scoring model. This is a one-time
-// refresh operation, not a hot path, so a generous timeout costs nothing.
-const PROBE_TIMEOUT_MS = 90000;
-
-/**
- * A model can score well on the leaderboard and still be unusable right now
- * (observed: region-locked models return a 403 with no output). Probe each
- * band's top candidate with a trivial prompt and fall through to the next
- * one in the same cost band if it fails, instead of saving a tier pick that
- * silently breaks every job that uses it.
- */
-async function validateTierPick(name, band) {
-  for (const candidate of band) {
-    const jobId = startJob({ prompt: "Reply with exactly: OK", model: candidate.model, variant: candidate.variant });
-    await waitForJob(jobId, PROBE_TIMEOUT_MS);
-    const s = jobSummary(getJob(jobId));
-    if (s.status === "completed") {
-      return { entry: toTierEntry(name, candidate), verified: true };
-    }
-    // Still running after the timeout (as opposed to a hard failure like a
-    // region-lock 403) — don't leave it as an orphaned background process
-    // while we move on to the next candidate.
-    if (s.status === "running") cancelJob(jobId);
-  }
-  // Whole band failed to respond — fall back to its top pick anyway (best
-  // information available) but flag it clearly rather than hiding the issue.
-  return { entry: toTierEntry(name, band[0]), verified: false };
-}
 
 /**
  * Mark a tier's final winner as `inherited` when a strictly cheaper tier's
  * final winner is the same model+variant — i.e. the cumulative cost pools in
- * computeTierMap actually collapsed two tiers together (post live-validation
- * fallback, which can change which model "wins" from what the raw ranking
- * picked). Purely informational.
+ * computeTierMap actually collapsed two tiers together. Purely informational.
  */
 function flagInheritedTiers(tiers) {
   TIER_NAMES.forEach((name, i) => {
@@ -57,17 +35,39 @@ function flagInheritedTiers(tiers) {
   });
 }
 
-/** Shared by the manual opencode_refresh_tiers tool and the automatic daily refresh below. */
+/**
+ * Recompute the tier map from cost + arena score. No probing, no opencode run
+ * calls at all — purely a local CLI call (`opencode models --verbose`) plus
+ * one HTTP fetch of the arena leaderboard, so it's effectively free and can
+ * run on every stale check without a second thought. Models confirmed broken
+ * by actual job failures (see recordJobOutcome) are excluded via the live
+ * blocklist rather than re-probed.
+ */
 async function refreshTierMap() {
-  const result = await computeTierMap();
-  const tiers = {};
-  for (const name of TIER_NAMES) {
-    const { entry, verified } = await validateTierPick(name, result.bands[name]);
-    tiers[name] = { ...entry, verified };
-  }
+  const result = await computeTierMap({ blocklist: getBlocklist() });
+  const tiers = result.tiers;
   flagInheritedTiers(tiers);
   saveTierMap({ ...result, tiers });
-  return { tiers, unmatched: result.unmatched, matchedCount: result.candidates.length, computedAt: result.computedAt };
+  return { tiers, unmatched: result.unmatched, blocked: result.blocked, matchedCount: result.candidates.length, computedAt: result.computedAt };
+}
+
+/**
+ * Called from jobs.js when ANY job finishes, whether or not anyone is
+ * waiting on it (fire-and-forget jobs self-heal this way too — see
+ * opencode_start_job). A confirmed failure (real error/non-zero exit, not
+ * just "still running" — see jobs.js, waitForJob's timeout never sets
+ * status to "failed") on a job that used a `tier` gets its model+variant
+ * blocked so future tier resolutions skip it immediately, without waiting
+ * for the next daily refresh. This replaces the old proactive live-probe:
+ * cost is paid only on real usage, and only when something's actually
+ * broken — never for a merely slow model (kimi-k3/max legitimately takes
+ * 30-60s and must NOT be blocked for that alone).
+ */
+function recordJobOutcome(job) {
+  if (job.status !== "failed" || !job.tier) return;
+  blockModel(job.model, job.variant, job.errorMessage || "job failed");
+  console.error(`[opencode-mcp] ${job.model}${job.variant ? "/" + job.variant : ""} failed (tier ${job.tier}) — blocked for 24h.`);
+  refreshTierMap().catch((e) => console.error("[opencode-mcp] post-failure tier refresh failed:", e.message ?? e));
 }
 
 /**
@@ -166,7 +166,13 @@ server.tool(
       const subscriptionConfigured = providers.includes("OpenCode Go");
       const availableModels = subscriptionConfigured ? await listModels("opencode-go") : [];
       const tierMap = getTierMap();
-      const result = { subscriptionConfigured, availableModels, tiers: tierMap, tierMapMeta: getTierMapMeta() };
+      const result = {
+        subscriptionConfigured,
+        availableModels,
+        tiers: tierMap,
+        tierMapMeta: getTierMapMeta(),
+        blocked: listBlocked(),
+      };
 
       if (probe && subscriptionConfigured) {
         const probes = {};
@@ -188,7 +194,7 @@ server.tool(
 
 server.tool(
   "opencode_refresh_tiers",
-  "Force an immediate recompute of the low/mid/high/max tier map (cross-referencing opencode-go cost data against the WebDev/code arena leaderboard; each tier's pool is cumulative — everything at or under its cost ceiling, not just its own cost quartile — so a cheap model that beats pricier ones wins every tier up to its ceiling; live-probes each pick, falling through to the next-best candidate in the pool if one is unreachable). This normally happens automatically once a day the first time a job is delegated — use this tool only when you need it to happen RIGHT NOW (e.g. right after hearing the Go lineup changed), not as a routine step.",
+  "Force an immediate recompute of the low/mid/high/max tier map (cross-referencing opencode-go cost data against the WebDev/code arena leaderboard; each tier's pool is cumulative — everything at or under its cost ceiling — and its winner is the CHEAPEST model within 1% of the pool's best arena score, not just the outright top scorer, so a near-tie doesn't cost 10x more for nothing). This is a pure local computation (one CLI call, one HTTP fetch) — no probing, no opencode run calls, effectively free. This normally happens automatically once a day the first time a job is delegated — use this tool only when you need it to happen RIGHT NOW (e.g. right after a model lineup change), not as a routine step. Use opencode_unblock_model instead if you specifically want to give a recently-failed model another chance.",
   {},
   async () => {
     try {
@@ -200,8 +206,26 @@ server.tool(
 );
 
 server.tool(
+  "opencode_unblock_model",
+  "Manually clear a model+variant from the 24h failure blocklist (see opencode_check_go_status's `blocked` field for what's currently excluded) and immediately recompute tiers so it's back in rotation. Use this right after fixing whatever caused the failure — e.g. re-enabling a model in the OpenCode dashboard — instead of waiting out the TTL.",
+  {
+    model: z.string().describe('e.g. "opencode-go/deepseek-v4-flash"'),
+    variant: z.string().optional().describe('e.g. "high" — omit if the blocked entry has no variant'),
+  },
+  async ({ model, variant }) => {
+    try {
+      const existed = unblockModel(model, variant ?? null);
+      const refreshed = await refreshTierMap();
+      return ok({ existed, ...refreshed });
+    } catch (e) {
+      return err(String(e.message ?? e));
+    }
+  }
+);
+
+server.tool(
   "opencode_start_job",
-  "Send a job (a prompt/task) to OpenCode to work on. Pick a `tier` (low/mid/high/max) instead of a specific model name — tiers are data-driven (see opencode_refresh_tiers): each is the best-scoring model on the WebDev/code arena leaderboard within its cost band on the OpenCode Go subscription (flat-rate, no marginal cost). Default to the lowest tier that can plausibly do the job; only reach for `max` when the task clearly needs the deepest reasoning available. Pass an explicit `model` instead of `tier` only when you specifically need something outside the tier map (see opencode_list_models). Output defaults to a clean hand-off (final result only, no narrated process) — set style:\"verbose\" only if you actually want to see the model's exploration/reasoning (e.g. debugging why a job did something unexpected).\n\nIMPORTANT — there is no push notification when a job finishes: MCP tool calls are strictly request/response, this server cannot interrupt the conversation on its own, and nothing resembling the native run_in_background task-notification exists here. Pass `waitMs` (recommended for most jobs — up to 540000ms/9min) to block this single call until the job actually finishes and get the full result back directly. Omit `waitMs` only when you deliberately want fire-and-forget (returns just a jobId immediately) and will follow up yourself later with opencode_job_status — never assume you'll be told when it's done.",
+  "Send a job (a prompt/task) to OpenCode to work on. Pick a `tier` (low/mid/high/max) instead of a specific model name — tiers are data-driven (see opencode_refresh_tiers): each is the cheapest model within 1% of the best arena score in its cost band on the OpenCode Go subscription (flat-rate, no marginal cost). Default to the lowest tier that can plausibly do the job; only reach for `max` when the task clearly needs the deepest reasoning available. Pass an explicit `model` instead of `tier` only when you specifically need something outside the tier map (see opencode_list_models). Output defaults to a clean hand-off (final result only, no narrated process) — set style:\"verbose\" only if you actually want to see the model's exploration/reasoning (e.g. debugging why a job did something unexpected).\n\nA `tier` pick that fails outright (real error, e.g. region-locked/disabled — not just slow) is automatically retried with the next-best candidate in the same cost pool, and gets excluded from future resolutions for 24h (see opencode_unblock_model to clear that early). This happens on real usage only — there is no separate probing step burning tokens just to check.\n\nIMPORTANT — there is no push notification when a job finishes: MCP tool calls are strictly request/response, this server cannot interrupt the conversation on its own, and nothing resembling the native run_in_background task-notification exists here. Pass `waitMs` (recommended for most jobs — up to 540000ms/9min) to block this single call until the job actually finishes and get the full result back directly (also required for the automatic fallback above to retry within this same call). Omit `waitMs` only when you deliberately want fire-and-forget (returns just a jobId immediately) and will follow up yourself later with opencode_job_status — never assume you'll be told when it's done.",
   {
     prompt: z.string().describe("The task/message to send to opencode"),
     waitMs: z
@@ -249,26 +273,59 @@ server.tool(
   async ({ tier, model, variant, style, waitMs, ...rest }) => {
     maybeAutoRefreshTiers();
     try {
-      const resolved = resolveModel({ model, tier });
-      const effectiveVariant = model ? (variant ?? null) : resolved.variant;
-      const effectiveTier = model ? null : (tier ?? DEFAULT_TIER);
       const prompt = style === "verbose" ? rest.prompt : rest.prompt + HANDOFF_SUFFIX;
-      const jobId = startJob({ ...rest, prompt, model: resolved.model, variant: effectiveVariant, tier: effectiveTier });
+      const usingTier = !model;
+      const MAX_ATTEMPTS = 5;
+      const attempts = [];
 
-      if (waitMs) {
+      for (let i = 0; i < MAX_ATTEMPTS; i++) {
+        // Re-resolve every attempt (not just once) so a failure blocked by
+        // the previous iteration's onDone callback is already excluded —
+        // this walks the fallback pool without needing to index into a
+        // band snapshot that could go stale mid-loop.
+        const resolved = resolveModel({ model, tier });
+        const effectiveVariant = model ? (variant ?? null) : resolved.variant;
+        const effectiveTier = usingTier ? (tier ?? DEFAULT_TIER) : null;
+        const jobId = startJob({
+          ...rest,
+          prompt,
+          model: resolved.model,
+          variant: effectiveVariant,
+          tier: effectiveTier,
+          onDone: recordJobOutcome,
+        });
+        attempts.push({ jobId, model: resolved.model, variant: effectiveVariant });
+
+        if (!waitMs) {
+          return ok({
+            jobId,
+            status: "running",
+            tier: effectiveTier,
+            model: resolved.model,
+            variant: effectiveVariant,
+            style: style ?? "handoff",
+            dir: rest.dir ?? null,
+          });
+        }
+
         await waitForJob(jobId, waitMs);
-        return ok(jobSummary(getJob(jobId)));
+        const summary = jobSummary(getJob(jobId));
+
+        // Only retry on a confirmed failure of a tier-resolved job — an
+        // explicit `model` never falls back (the caller chose it on
+        // purpose), and "still running" past waitMs is not a failure, it's
+        // just slow (e.g. kimi-k3/max legitimately takes 30-60s).
+        if (summary.status !== "failed" || !usingTier) {
+          return ok(attempts.length > 1 ? { ...summary, attempts } : summary);
+        }
+        // onDone already blocked this model+variant synchronously before
+        // waitForJob resolved (same close/error handler) — next loop
+        // iteration's resolveModel call will skip it automatically.
       }
 
-      return ok({
-        jobId,
-        status: "running",
-        tier: effectiveTier,
-        model: resolved.model,
-        variant: effectiveVariant,
-        style: style ?? "handoff",
-        dir: rest.dir ?? null,
-      });
+      return err(
+        `All ${MAX_ATTEMPTS} candidates for tier "${tier ?? DEFAULT_TIER}" failed. Attempts: ${JSON.stringify(attempts)}`
+      );
     } catch (e) {
       return err(String(e.message ?? e));
     }

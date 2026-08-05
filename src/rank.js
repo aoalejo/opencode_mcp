@@ -3,6 +3,13 @@ import { fetchWebDevLeaderboard, matchModel } from "./leaderboard.js";
 
 const TIER_NAMES = ["low", "mid", "high", "max"];
 
+// If a cheaper model scores within this fraction of the best score in its
+// pool, prefer it over the top scorer — a 0.5-point edge isn't worth 10x the
+// cost. 1% is deliberately conservative (only catches near-ties, not "10
+// points cheaper for 50 points less score"); tune here if it's too
+// aggressive/timid in practice.
+const SCORE_TOLERANCE_PCT = 0.01;
+
 /**
  * Cross-reference every opencode-go model's real per-token cost (local,
  * authoritative — see catalog.listModelsVerbose) against its WebDev/code
@@ -11,25 +18,30 @@ const TIER_NAMES = ["low", "mid", "high", "max"];
  * Tiers use CUMULATIVE cost pools, not exclusive cost bands: each tier has a
  * cost ceiling (the quartile cutoffs of the full candidate list — low's
  * ceiling is the 25th-percentile cost, mid's the 50th, high's the 75th, max
- * has none), and its winner is the highest-arena-score model anywhere at or
- * under that ceiling — including models cheap enough to belong to a lower
- * tier. This means a cheap model that outperforms every pricier option below
- * its ceiling wins every tier up to that ceiling (e.g. observed 2026-08-03:
- * gpt-5.6-luna, cheap enough for `low`, outscored every model in the `mid`
- * cost bracket, so it legitimately won both — there's no reason to pay more
- * for something worse). Pools are nested by construction (low subset of mid
- * subset of high subset of max), so scores are monotonically non-decreasing
- * from low to max. Whether a tier's final winner also won a cheaper tier
- * (i.e. the collapse actually happened, post live-validation fallback) is
- * flagged by index.js's refreshTierMap, not here — this module only picks
- * candidates per tier.
+ * has none), and its winner is drawn from anywhere at or under that ceiling
+ * — including models cheap enough to belong to a lower tier. Pools are
+ * nested by construction (low subset of mid subset of high subset of max).
+ *
+ * Within a tier's pool, the winner is NOT simply the highest score — it's
+ * the CHEAPEST model within `SCORE_TOLERANCE_PCT` of the pool's best score
+ * (see `pickBest`). A 1676-vs-1668 gap (0.5%) doesn't justify paying 5x more,
+ * so the cheaper of the two wins; a 1577-vs-1523 gap (3.5%) is treated as a
+ * real quality difference and the higher scorer still wins. This means a
+ * cheap model that's merely "good enough" relative to the pool's ceiling can
+ * win a tier even without being the outright top scorer.
+ *
+ * A `blocklist` (Set of "model|variant" strings, variant "" for none) can be
+ * passed to exclude models confirmed broken by actual usage (see
+ * index.js's recordFailureAndDemote) — excluded entirely, not just
+ * deprioritized, since a confirmed-broken pick is never worth offering as a
+ * fallback either.
  *
  * Models with no leaderboard match (e.g. a real distinct SKU the arena
  * hasn't ranked, like qwen3.7-plus as of 2026-08) are excluded from the
  * ranked tiers but reported in `unmatched` for visibility — never silently
  * dropped.
  */
-export async function computeTierMap() {
+export async function computeTierMap({ blocklist = new Set() } = {}) {
   const [entries, leaderboard] = await Promise.all([
     listModelsVerbose("opencode-go"),
     fetchWebDevLeaderboard(),
@@ -40,11 +52,16 @@ export async function computeTierMap() {
 
   const candidates = [];
   const unmatched = [];
+  const blocked = [];
   for (const { model, info } of entries) {
     const bareId = model.split("/").slice(1).join("/");
     const match = matchModel(bareId, leaderboard);
     if (!match) {
       unmatched.push(model);
+      continue;
+    }
+    if (blocklist.has(blockKey(model, match.variant))) {
+      blocked.push(model);
       continue;
     }
     candidates.push({
@@ -60,7 +77,7 @@ export async function computeTierMap() {
 
   if (candidates.length < TIER_NAMES.length) {
     throw new Error(
-      `Only ${candidates.length} models matched the leaderboard — not enough to fill ${TIER_NAMES.length} tiers.`
+      `Only ${candidates.length} models matched the leaderboard and aren't blocked — not enough to fill ${TIER_NAMES.length} tiers.`
     );
   }
 
@@ -79,11 +96,12 @@ export async function computeTierMap() {
   const bands = {};
   TIER_NAMES.forEach((name, i) => {
     const eligible = candidates.filter((c) => (c.cost?.input ?? 0) <= ceilings[i]);
-    // Best (highest arena score) first, so a caller can fall through to the
-    // next-best eligible candidate if the top pick turns out unreachable
-    // (e.g. region-locked — see index.js's opencode_refresh_tiers, which
-    // live-validates each pick before saving).
-    bands[name] = eligible.sort((a, b) => b.arenaScore - a.arenaScore);
+    const winner = pickBest(eligible);
+    // Winner first (that's what a caller should try), then the rest by
+    // descending score as the fallback order if the winner turns out to be
+    // broken — at that point "cheap enough" already failed, so reach for
+    // quality on the way back up instead of re-applying the tolerance rule.
+    bands[name] = [winner, ...eligible.filter((c) => c !== winner).sort((a, b) => b.arenaScore - a.arenaScore)];
   });
 
   const tiers = {};
@@ -91,7 +109,18 @@ export async function computeTierMap() {
     tiers[name] = toTierEntry(name, bands[name][0]);
   }
 
-  return { tiers, bands, candidates, unmatched, computedAt: Date.now() };
+  return { tiers, bands, candidates, unmatched, blocked, computedAt: Date.now() };
+}
+
+/** Cheapest model within SCORE_TOLERANCE_PCT of the pool's best arena score. */
+function pickBest(pool) {
+  const maxScore = Math.max(...pool.map((c) => c.arenaScore));
+  const nearBest = pool.filter((c) => c.arenaScore >= maxScore * (1 - SCORE_TOLERANCE_PCT));
+  return nearBest.reduce((a, b) => (b.cost.input < a.cost.input ? b : a));
+}
+
+export function blockKey(model, variant) {
+  return `${model}|${variant ?? ""}`;
 }
 
 export function toTierEntry(name, best) {

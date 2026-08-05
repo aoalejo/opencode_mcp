@@ -45,23 +45,29 @@ MCP servers get. Two correct patterns:
 
 `low`/`mid`/`high`/`max` are computed (`src/rank.js`) by cross-referencing every
 opencode-go model's real cost (`opencode models --verbose`) against its
-WebDev/code arena score (scraped from arena.ai), splitting into 4 cost bands,
-and taking the best-scoring, live-verified model per band. This refreshes
-automatically once a day (`src/tiers.js`'s `isStale()` check, triggered
-fire-and-forget from `opencode_start_job`/`opencode_check_go_status`/server
-startup) — don't assume the mapping you saw last session still holds; a model
-that was `max` yesterday may not be today if the leaderboard or Go lineup moved.
+WebDev/code arena score (scraped from arena.ai), splitting into cumulative cost
+pools, and picking the CHEAPEST model within 1% of the pool's best score — not
+just the outright top scorer, so a near-tie in score never costs a large price
+premium for nothing. This refreshes automatically once a day (`src/tiers.js`'s
+`isStale()` check, triggered fire-and-forget from
+`opencode_start_job`/`opencode_check_go_status`/server startup) — don't assume
+the mapping you saw last session still holds; a model that was `max` yesterday
+may not be today if the leaderboard, Go lineup, or a recent failure moved it.
 
-## Reliability notes (observed, may go stale)
+## Broken models are caught by real usage, not by probing — don't over-explain a `tier` failure
 
-- OpenCode Go models: availability and responsiveness has varied — some hang
-  indefinitely with no output, some return region-lock errors (observed with
-  `deepseek-v4-flash`, which is otherwise a great cheap/high-scoring pick).
-  `opencode_cancel_job` exists for the hang case. The tier ranker already
-  live-probes and falls through to the next-best candidate in a band before
-  saving, so a region-locked top pick shouldn't normally reach you — but if a
-  job using a `tier` fails outright, check `opencode_check_go_status` before
-  assuming it's your prompt.
+There is no proactive live-probe anymore (removed 2026-08-05 — it cost real
+tokens on every refresh, and a too-short timeout falsely flagged a legitimately
+slow reasoning model, `kimi-k3/max`, as broken). Instead: a `tier` job that
+fails with a real error auto-retries the next-best candidate in the same cost
+pool (if you passed `waitMs`) and blocks that model+variant for 24h so future
+calls skip it immediately. If you're passing `waitMs`, you should basically
+never see this failure yourself — the retry is transparent. If you DID see one
+propagate (e.g. you omitted `waitMs`, or every candidate in the pool failed),
+check `opencode_check_go_status`'s `blocked` field before assuming it's your
+prompt; `opencode_cancel_job` still exists separately for a job that's merely
+hung with no output at all (different failure mode — a hang never resolves to
+"failed" on its own, so it won't trigger the auto-block; cancel it yourself).
 
 ## When something in opencode itself changes
 

@@ -20,8 +20,9 @@ today.
 
 ## Tools
 
-- `opencode_check_go_status` — confirms the OpenCode Go credential is configured and lists its current model lineup. Pass `probe:true` to actually ping the mid/high/max tier models (costs a little time/tokens — don't do this routinely).
-- `opencode_refresh_tiers` — recompute the low/mid/high/max tier map from live data (see "Model tiers" below). On-demand only, not routine.
+- `opencode_check_go_status` — confirms the OpenCode Go credential is configured, lists its current model lineup, and reports currently-blocked models. Pass `probe:true` to also manually ping the mid/high/max tier models right now (costs a little time/tokens — this is a diagnostic option, not part of the automatic failure-handling below).
+- `opencode_refresh_tiers` — recompute the low/mid/high/max tier map from live data (see "Model tiers" below). Pure local computation, effectively free. On-demand only, not routine (it already runs automatically once a day).
+- `opencode_unblock_model` — manually clear a model from the 24h failure blocklist and recompute immediately, e.g. right after re-enabling it in the OpenCode dashboard. See "Automatic failure handling" below.
 - `opencode_start_job` — send a prompt/task to a `tier` (low/mid/high/max) or an explicit `model`+`variant`, in a given directory. Pass `waitMs` to block until it finishes and get the full result back in this same call (recommended — see "No push notifications" below); omit it for fire-and-forget (returns just a `jobId`).
 - `opencode_job_status` — check on a job started earlier; pass `waitMs` to block until it finishes.
 - `opencode_list_jobs` — list all jobs started this server session.
@@ -94,32 +95,27 @@ built by `computeTierMap()` (`src/rank.js`):
    tier from the quartile cutoffs (`low`'s ceiling = 25th-percentile cost,
    `mid`'s = 50th, `high`'s = 75th, `max` has none). Each tier's pool is
    **cumulative** — every candidate at or under its ceiling, not just the ones
-   in its own quartile — and its winner is the single highest-arena-score
-   model in that pool. This means a cheap model that outperforms everything
-   pricier below its ceiling wins every tier up to that ceiling: observed
-   2026-08-03, `gpt-5.6-luna` (cheap enough for `low`) outscored every model
-   in the `mid` bracket and won both — there's no reason to pay more for
-   something worse. Pools nest (low ⊆ mid ⊆ high ⊆ max) so scores never
-   decrease going up the tiers.
-4. **Live-probe** each tier's top pick with a trivial prompt before saving; if
-   it's unreachable (e.g. region-locked — observed with `deepseek-v4-flash`,
-   which otherwise would have won `low`+`mid`), fall through to the next-best
-   candidate in the same pool instead of saving a pick that would silently
-   fail every job. A tier that exhausts its whole pool without success still
-   gets saved (best-effort) but flagged `verified: false`. Probes wait up to
-   `PROBE_TIMEOUT_MS` (90s, `index.js`) — reasoning-heavy variants like
-   `kimi-k3/max` can genuinely take 30-60s to answer even a 1-word prompt
-   (observed 2026-08-05: a 20s timeout treated it as "still running" =
-   unreachable and wrongly demoted it below a worse-scoring model; this is a
-   one-time refresh, not a hot path, so a generous timeout costs nothing). A
-   probe that times out gets cancelled rather than left as an orphaned
-   background process.
+   in its own quartile.
+4. Within a tier's pool, the winner is **not simply the highest score** — it's
+   the cheapest model within `SCORE_TOLERANCE_PCT` (1%, `rank.js`) of the
+   pool's best score. A 1676-vs-1668 gap (0.5%) doesn't justify paying 50%
+   more, so the cheaper one wins; a 1577-vs-1523 gap (3.5%) is treated as a
+   real quality difference and the higher scorer still wins outright. This
+   also means a cheap model that's merely "good enough" relative to a tier's
+   ceiling can win it without being the pool's outright top scorer — e.g.
+   observed 2026-08-05, `qwen3.8-max` ($2, score 1668) beat `kimi-k3` ($3,
+   score 1676) for `max` under this rule. Pools nest (low ⊆ mid ⊆ high ⊆ max)
+   so scores are still monotonically non-decreasing from low to max.
 5. Flag a tier `inherited: true` (with `inheritedFrom: "<cheaper tier>"`) when
-   its final winner is the same model+variant as a cheaper tier's — i.e. the
-   collapse in step 3 actually happened, post-validation. This is informational
-   only; it doesn't change any selection.
-6. Persist the result to `tiers.generated.json` (gitignored — regenerate, don't
-   hand-edit) so `opencode_start_job` reads it with zero extra latency/network.
+   its final winner is the same model+variant as a cheaper tier's — i.e. one
+   model was good/cheap enough to win multiple tiers. Informational only.
+6. Persist the result (including each tier's full fallback list, not just the
+   winner) to `tiers.generated.json` (gitignored — regenerate, don't hand-edit).
+
+This is a **pure local computation** — one `opencode models --verbose` call
+plus one HTTP fetch of the arena leaderboard, no `opencode run` calls at all.
+See "Automatic failure handling" below for how broken models get excluded
+without needing to proactively probe every one of them.
 
 **This refresh happens automatically, at most once a day, with no tool call and
 no tokens spent describing it** — `opencode_start_job` (and `opencode_check_go_status`,
@@ -137,6 +133,38 @@ reasoning depth — `mid`/`high`/`max` don't cost extra dollars under a Go
 subscription, but every job still burns real tokens and wall-clock time. An
 explicit `model` (+ optional `variant`) param on `opencode_start_job` overrides
 the tier for one-off cases outside the map.
+
+## Automatic failure handling — no proactive probing (`recordJobOutcome` in `index.js`)
+
+Earlier versions of this ranker live-probed every tier's pick with a trivial
+prompt before saving, to catch models that score well but are actually
+unreachable (region-locked, disabled in the OpenCode dashboard, etc). That
+cost real tokens/time on every refresh — small per probe, but recurring, and
+it got a false positive: a legitimately slow reasoning model (`kimi-k3/max`,
+30-60s for even a 1-word answer) got treated as "broken" by a too-short probe
+timeout. Both problems are solved by not probing at all:
+
+- Every `opencode_start_job` tier resolution is tried for real. If it fails
+  with a genuine error (non-zero exit / an error message — e.g. `deepseek-v4-flash`
+  returning "requires explicit opt-in" when disabled in the dashboard), that
+  model+variant is **blocked for 24h** and the tier map is recomputed
+  immediately to exclude it — this happens whether or not the caller passed
+  `waitMs`, so even fire-and-forget jobs self-heal the map for next time.
+- **"Still running" past a timeout is never treated as a failure** — only an
+  actual error is. This is the fix for the `kimi-k3/max` false positive: a
+  slow-but-working model is never penalized just for being slow.
+- If `waitMs` was passed, a hard failure is retried automatically (up to 5
+  attempts) with the next-best candidate in the same cost pool, within the
+  *same* `opencode_start_job` call — the caller gets a working result without
+  needing to notice the failure and retry manually.
+- Blocks expire after 24h (same cadence as the tier refresh) so a transient
+  issue doesn't exile a model forever. To force it back sooner — e.g. right
+  after re-enabling a model you'd disabled in the OpenCode dashboard — call
+  `opencode_unblock_model`. Current blocks are visible in
+  `opencode_check_go_status`'s `blocked` field.
+- Cost is paid **only on real usage, only when something's actually broken**
+  — not on a schedule, not "just in case." A model that's simply never used
+  is never checked and never costs anything.
 
 ## Notable free/no-extra-cost models seen on this machine
 

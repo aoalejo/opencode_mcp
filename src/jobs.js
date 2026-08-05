@@ -111,6 +111,7 @@ export function startJob(opts) {
     model: opts.model,
     variant: opts.variant,
     tier: opts.tier,
+    onDone: opts.onDone,
     agent: opts.agent,
     dir: opts.dir,
     sessionId: null,
@@ -141,6 +142,11 @@ export function startJob(opts) {
       job.status = code === 0 && !job.errorMessage ? "completed" : "failed";
     }
     recordUsage(job, assembledText(job).length);
+    try {
+      job.onDone?.(job);
+    } catch (e) {
+      console.error("[opencode-mcp] onDone callback threw:", e.message ?? e);
+    }
     job.events.emit("done");
   });
   child.on("error", (err) => {
@@ -148,6 +154,11 @@ export function startJob(opts) {
     job.status = "failed";
     job.finishedAt = Date.now();
     recordUsage(job, assembledText(job).length);
+    try {
+      job.onDone?.(job);
+    } catch (e) {
+      console.error("[opencode-mcp] onDone callback threw:", e.message ?? e);
+    }
     job.events.emit("done");
   });
 
