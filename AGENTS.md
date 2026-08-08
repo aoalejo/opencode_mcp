@@ -60,8 +60,11 @@ There is no proactive live-probe anymore (removed 2026-08-05 — it cost real
 tokens on every refresh, and a too-short timeout falsely flagged a legitimately
 slow reasoning model, `kimi-k3/max`, as broken). Instead: a `tier` job that
 fails with a real error auto-retries the next-best candidate in the same cost
-pool (if you passed `waitMs`) and blocks that model+variant for 24h so future
-calls skip it immediately. If you're passing `waitMs`, you should basically
+pool (if you passed `waitMs`) and blocks that model+variant with exponential
+backoff (5min → 30min → 2h → 8h → 24h by consecutive failures, reset to 5min
+on the next success — not a flat 24h block, which used to keep routing to a
+pricier fallback for a whole day after a transient blip) so future calls skip
+it immediately. If you're passing `waitMs`, you should basically
 never see this failure yourself — the retry is transparent. If you DID see one
 propagate (e.g. you omitted `waitMs`, or every candidate in the pool failed),
 check `opencode_check_go_status`'s `blocked` field before assuming it's your

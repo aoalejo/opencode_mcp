@@ -22,7 +22,7 @@ today.
 
 - `opencode_check_go_status` — confirms the OpenCode Go credential is configured, lists its current model lineup, and reports currently-blocked models. Pass `probe:true` to also manually ping the mid/high/max tier models right now (costs a little time/tokens — this is a diagnostic option, not part of the automatic failure-handling below).
 - `opencode_refresh_tiers` — recompute the low/mid/high/max tier map from live data (see "Model tiers" below). Pure local computation, effectively free. On-demand only, not routine (it already runs automatically once a day).
-- `opencode_unblock_model` — manually clear a model from the 24h failure blocklist and recompute immediately, e.g. right after re-enabling it in the OpenCode dashboard. See "Automatic failure handling" below.
+- `opencode_unblock_model` — manually clear a model from the failure blocklist (exponential backoff, not a flat block — see "Automatic failure handling" below) and recompute immediately, e.g. right after re-enabling it in the OpenCode dashboard.
 - `opencode_start_job` — send a prompt/task to a `tier` (low/mid/high/max) or an explicit `model`+`variant`, in a given directory. Pass `waitMs` to block until it finishes and get the full result back in this same call (recommended — see "No push notifications" below); omit it for fire-and-forget (returns just a `jobId`).
 - `opencode_job_status` — check on a job started earlier; pass `waitMs` to block until it finishes.
 - `opencode_list_jobs` — list all jobs started this server session.
@@ -147,9 +147,10 @@ timeout. Both problems are solved by not probing at all:
 - Every `opencode_start_job` tier resolution is tried for real. If it fails
   with a genuine error (non-zero exit / an error message — e.g. `deepseek-v4-flash`
   returning "requires explicit opt-in" when disabled in the dashboard), that
-  model+variant is **blocked for 24h** and the tier map is recomputed
-  immediately to exclude it — this happens whether or not the caller passed
-  `waitMs`, so even fire-and-forget jobs self-heal the map for next time.
+  model+variant is **blocked with exponential backoff** and the tier map is
+  recomputed immediately to exclude it — this happens whether or not the
+  caller passed `waitMs`, so even fire-and-forget jobs self-heal the map for
+  next time.
 - **"Still running" past a timeout is never treated as a failure** — only an
   actual error is. This is the fix for the `kimi-k3/max` false positive: a
   slow-but-working model is never penalized just for being slow.
@@ -157,11 +158,18 @@ timeout. Both problems are solved by not probing at all:
   attempts) with the next-best candidate in the same cost pool, within the
   *same* `opencode_start_job` call — the caller gets a working result without
   needing to notice the failure and retry manually.
-- Blocks expire after 24h (same cadence as the tier refresh) so a transient
-  issue doesn't exile a model forever. To force it back sooner — e.g. right
-  after re-enabling a model you'd disabled in the OpenCode dashboard — call
-  `opencode_unblock_model`. Current blocks are visible in
-  `opencode_check_go_status`'s `blocked` field.
+- **Backoff, not a flat block** (`BACKOFF_SCHEDULE_MS`, `tiers.js`): 5min for a
+  first failure, escalating to 30min → 2h → 8h → 24h only if the model keeps
+  failing on repeated real attempts. A single success clears the failure
+  history entirely, so the next isolated blip starts back at 5min instead of
+  compounding. This exists because a flat 24h block (the original design)
+  meant a brief real outage — observed 2026-08-08, `deepseek-v4-flash` down for
+  what was probably minutes — kept routing to a pricier fallback (`gpt-5.6-luna`)
+  for the rest of the day until manually unblocked, visibly spiking that day's
+  spend for no good reason. To force a block clear sooner regardless of backoff
+  — e.g. right after re-enabling a model you'd disabled in the OpenCode
+  dashboard — call `opencode_unblock_model`. Current blocks (with remaining
+  backoff time) are visible in `opencode_check_go_status`'s `blocked` field.
 - Cost is paid **only on real usage, only when something's actually broken**
   — not on a schedule, not "just in case." A model that's simply never used
   is never checked and never costs anything.

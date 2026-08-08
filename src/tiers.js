@@ -68,12 +68,21 @@ export function isStale(maxAgeMs = ONE_DAY_MS) {
   return Date.now() - meta.computedAt > maxAgeMs;
 }
 
-// How long a model stays excluded after a confirmed failure before it's
-// eligible again — matches the tier refresh cadence so a blocked pick gets
-// re-evaluated roughly once a day, same rhythm as the ranking itself. Not
-// tied to actually re-testing it: if it's still broken it'll just get
-// re-blocked the next time a job resolves to it and fails again.
-const BLOCKLIST_TTL_MS = ONE_DAY_MS;
+// Exponential backoff, not a flat block: a single transient blip (a provider
+// hiccup lasting seconds/minutes) should only cost a few minutes of routing
+// around it, not a full day — observed 2026-08-08, a brief deepseek-v4-flash
+// outage kept low/mid/high on the pricier gpt-5.6-luna for hours until
+// manually unblocked, visibly spiking that day's spend. Only a model that
+// keeps failing on repeated real attempts escalates toward the old 24h
+// ceiling; failCount resets to 0 the moment a real job on it succeeds
+// (see recordSuccess).
+const BACKOFF_SCHEDULE_MS = [
+  5 * 60 * 1000, // 1st failure: 5 min
+  30 * 60 * 1000, // 2nd: 30 min
+  2 * 60 * 60 * 1000, // 3rd: 2h
+  8 * 60 * 60 * 1000, // 4th: 8h
+  ONE_DAY_MS, // 5th+: 24h (same ceiling as before)
+];
 
 function loadBlocklistRaw() {
   if (!existsSync(BLOCKLIST_PATH)) return {};
@@ -88,26 +97,53 @@ function saveBlocklistRaw(entries) {
   writeFileSync(BLOCKLIST_PATH, JSON.stringify(entries, null, 2));
 }
 
+function ttlFor(failCount) {
+  return BACKOFF_SCHEDULE_MS[Math.min(failCount - 1, BACKOFF_SCHEDULE_MS.length - 1)];
+}
+
 /** Non-expired blocklist entries as a Set of "model|variant" keys, for rank.js's computeTierMap. */
 export function getBlocklist() {
   const entries = loadBlocklistRaw();
   const now = Date.now();
   const live = new Set();
   for (const [key, entry] of Object.entries(entries)) {
-    if (now - entry.blockedAt <= BLOCKLIST_TTL_MS) live.add(key);
+    const ttlMs = entry.ttlMs ?? ttlFor(entry.failCount ?? 1);
+    if (now - entry.blockedAt <= ttlMs) live.add(key);
   }
   return live;
 }
 
 /**
- * Record a confirmed failure (real error, not just a slow response — see
- * index.js's isHardFailure) so this model+variant is skipped by future tier
- * resolutions until BLOCKLIST_TTL_MS passes or it's manually cleared.
+ * Record a confirmed failure (real error, not just a slow response) so this
+ * model+variant is skipped by future tier resolutions. Each consecutive
+ * failure (i.e. it's STILL broken the next time something actually tried it,
+ * since a live block would have prevented an earlier retry) escalates to the
+ * next step of BACKOFF_SCHEDULE_MS instead of jumping straight to a long
+ * block — see the schedule's comment for why.
  */
 export function blockModel(model, variant, reason) {
   const entries = loadBlocklistRaw();
-  entries[blockKey(model, variant)] = { model, variant: variant ?? null, blockedAt: Date.now(), reason };
+  const key = blockKey(model, variant);
+  const failCount = (entries[key]?.failCount ?? 0) + 1;
+  const ttlMs = ttlFor(failCount);
+  entries[key] = { model, variant: variant ?? null, blockedAt: Date.now(), reason, failCount, ttlMs };
   saveBlocklistRaw(entries);
+}
+
+/**
+ * A real job on this model+variant succeeded — clear any blocklist history
+ * for it (not just the live block, the failCount too) so a future isolated
+ * failure starts the backoff over at 5 min instead of escalating from
+ * wherever a past, now-resolved incident left off. Returns true if there was
+ * anything to clear (used to decide whether a tier recompute is worth doing).
+ */
+export function recordSuccess(model, variant) {
+  const entries = loadBlocklistRaw();
+  const key = blockKey(model, variant);
+  if (!(key in entries)) return false;
+  delete entries[key];
+  saveBlocklistRaw(entries);
+  return true;
 }
 
 /** Manual override — e.g. after re-enabling a model in the OpenCode dashboard, don't wait out the TTL. */
@@ -123,7 +159,10 @@ export function unblockModel(model, variant) {
 export function listBlocked() {
   const entries = loadBlocklistRaw();
   const now = Date.now();
-  return Object.values(entries).map((e) => ({ ...e, expired: now - e.blockedAt > BLOCKLIST_TTL_MS }));
+  return Object.values(entries).map((e) => {
+    const ttlMs = e.ttlMs ?? ttlFor(e.failCount ?? 1);
+    return { ...e, ttlMs, expired: now - e.blockedAt > ttlMs, remainingMs: Math.max(0, ttlMs - (now - e.blockedAt)) };
+  });
 }
 
 /**

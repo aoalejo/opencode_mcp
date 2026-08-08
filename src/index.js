@@ -14,6 +14,7 @@ import {
   isStale,
   getBlocklist,
   blockModel,
+  recordSuccess,
   unblockModel,
   listBlocked,
 } from "./tiers.js";
@@ -56,18 +57,25 @@ async function refreshTierMap() {
  * waiting on it (fire-and-forget jobs self-heal this way too — see
  * opencode_start_job). A confirmed failure (real error/non-zero exit, not
  * just "still running" — see jobs.js, waitForJob's timeout never sets
- * status to "failed") on a job that used a `tier` gets its model+variant
- * blocked so future tier resolutions skip it immediately, without waiting
- * for the next daily refresh. This replaces the old proactive live-probe:
- * cost is paid only on real usage, and only when something's actually
- * broken — never for a merely slow model (kimi-k3/max legitimately takes
- * 30-60s and must NOT be blocked for that alone).
+ * status to "failed") on a job that used a `tier` blocks that model+variant
+ * with exponential backoff (see tiers.js's BACKOFF_SCHEDULE_MS) so a single
+ * transient blip only costs a few minutes of routing around it, not a full
+ * day — observed 2026-08-08, a brief real outage kept low/mid/high on a
+ * pricier fallback for hours because the old design used a flat 24h block.
+ * A subsequent SUCCESS on that same model+variant clears its failure history
+ * entirely, so backoff always starts fresh rather than compounding forever.
  */
 function recordJobOutcome(job) {
-  if (job.status !== "failed" || !job.tier) return;
-  blockModel(job.model, job.variant, job.errorMessage || "job failed");
-  console.error(`[opencode-mcp] ${job.model}${job.variant ? "/" + job.variant : ""} failed (tier ${job.tier}) — blocked for 24h.`);
-  refreshTierMap().catch((e) => console.error("[opencode-mcp] post-failure tier refresh failed:", e.message ?? e));
+  if (!job.tier) return;
+  if (job.status === "failed") {
+    blockModel(job.model, job.variant, job.errorMessage || "job failed");
+    console.error(`[opencode-mcp] ${job.model}${job.variant ? "/" + job.variant : ""} failed (tier ${job.tier}) — backed off.`);
+    refreshTierMap().catch((e) => console.error("[opencode-mcp] post-failure tier refresh failed:", e.message ?? e));
+  } else if (job.status === "completed") {
+    if (recordSuccess(job.model, job.variant)) {
+      refreshTierMap().catch((e) => console.error("[opencode-mcp] post-recovery tier refresh failed:", e.message ?? e));
+    }
+  }
 }
 
 /**
@@ -207,7 +215,7 @@ server.tool(
 
 server.tool(
   "opencode_unblock_model",
-  "Manually clear a model+variant from the 24h failure blocklist (see opencode_check_go_status's `blocked` field for what's currently excluded) and immediately recompute tiers so it's back in rotation. Use this right after fixing whatever caused the failure — e.g. re-enabling a model in the OpenCode dashboard — instead of waiting out the TTL.",
+  "Manually clear a model+variant from the failure blocklist (see opencode_check_go_status's `blocked` field for what's currently excluded, including remaining backoff time) and immediately recompute tiers so it's back in rotation. Blocks use exponential backoff (5min/30min/2h/8h/24h by consecutive failure count, reset on the next success) so this is mostly useful to skip a wait early — e.g. right after re-enabling a model in the OpenCode dashboard — not routinely needed otherwise.",
   {
     model: z.string().describe('e.g. "opencode-go/deepseek-v4-flash"'),
     variant: z.string().optional().describe('e.g. "high" — omit if the blocked entry has no variant'),
@@ -225,7 +233,7 @@ server.tool(
 
 server.tool(
   "opencode_start_job",
-  "Send a job (a prompt/task) to OpenCode to work on. Pick a `tier` (low/mid/high/max) instead of a specific model name — tiers are data-driven (see opencode_refresh_tiers): each is the cheapest model within 1% of the best arena score in its cost band on the OpenCode Go subscription (flat-rate, no marginal cost). Default to the lowest tier that can plausibly do the job; only reach for `max` when the task clearly needs the deepest reasoning available. Pass an explicit `model` instead of `tier` only when you specifically need something outside the tier map (see opencode_list_models). Output defaults to a clean hand-off (final result only, no narrated process) — set style:\"verbose\" only if you actually want to see the model's exploration/reasoning (e.g. debugging why a job did something unexpected).\n\nA `tier` pick that fails outright (real error, e.g. region-locked/disabled — not just slow) is automatically retried with the next-best candidate in the same cost pool, and gets excluded from future resolutions for 24h (see opencode_unblock_model to clear that early). This happens on real usage only — there is no separate probing step burning tokens just to check.\n\nIMPORTANT — there is no push notification when a job finishes: MCP tool calls are strictly request/response, this server cannot interrupt the conversation on its own, and nothing resembling the native run_in_background task-notification exists here. Pass `waitMs` (recommended for most jobs — up to 540000ms/9min) to block this single call until the job actually finishes and get the full result back directly (also required for the automatic fallback above to retry within this same call). Omit `waitMs` only when you deliberately want fire-and-forget (returns just a jobId immediately) and will follow up yourself later with opencode_job_status — never assume you'll be told when it's done.",
+  "Send a job (a prompt/task) to OpenCode to work on. Pick a `tier` (low/mid/high/max) instead of a specific model name — tiers are data-driven (see opencode_refresh_tiers): each is the cheapest model within 1% of the best arena score in its cost band on the OpenCode Go subscription (flat-rate, no marginal cost). Default to the lowest tier that can plausibly do the job; only reach for `max` when the task clearly needs the deepest reasoning available. Pass an explicit `model` instead of `tier` only when you specifically need something outside the tier map (see opencode_list_models). Output defaults to a clean hand-off (final result only, no narrated process) — set style:\"verbose\" only if you actually want to see the model's exploration/reasoning (e.g. debugging why a job did something unexpected).\n\nA `tier` pick that fails outright (real error, e.g. region-locked/disabled — not just slow) is automatically retried with the next-best candidate in the same cost pool, and gets excluded from future resolutions with exponential backoff (5min for a first failure, escalating toward 24h only if it keeps failing on repeated real attempts — see opencode_unblock_model to clear that early). This happens on real usage only — there is no separate probing step burning tokens just to check.\n\nIMPORTANT — there is no push notification when a job finishes: MCP tool calls are strictly request/response, this server cannot interrupt the conversation on its own, and nothing resembling the native run_in_background task-notification exists here. Pass `waitMs` (recommended for most jobs — up to 540000ms/9min) to block this single call until the job actually finishes and get the full result back directly (also required for the automatic fallback above to retry within this same call). Omit `waitMs` only when you deliberately want fire-and-forget (returns just a jobId immediately) and will follow up yourself later with opencode_job_status — never assume you'll be told when it's done.",
   {
     prompt: z.string().describe("The task/message to send to opencode"),
     waitMs: z
