@@ -135,7 +135,32 @@ export function startJob(opts) {
     job.stderr += chunk.toString("utf8");
     if (job.stderr.length > 8000) job.stderr = job.stderr.slice(-8000);
   });
-  child.on("close", (code) => {
+
+  // Node's 'close' only fires once ALL stdio file descriptors are closed —
+  // if `opencode run` left a descendant process running (a background bash
+  // command, another MCP server it connected to, an orphaned watcher) that
+  // inherited those pipes, 'close' can be delayed indefinitely even though
+  // opencode's own process — and the real work it did — is long finished.
+  // 'exit' fires the instant the process itself terminates, independent of
+  // its pipes, so it's the reliable signal; 'close' is kept as a backstop
+  // for whichever case fires first. `settled` prevents double-finalizing if
+  // both arrive (the normal case — usually milliseconds apart).
+  let settled = false;
+  let settledAt = null;
+  function finalize(code, via) {
+    if (settled) {
+      // The other event still arrived eventually — log the gap so we have
+      // real production evidence of how often/how badly this actually
+      // happens, rather than just trusting the fix worked from synthetic
+      // tests.
+      const gapMs = Date.now() - settledAt;
+      if (gapMs > 2000) {
+        console.error(`[opencode-mcp] job ${id}: '${via}' arrived ${gapMs}ms after the event that already settled it — a descendant process likely held the pipe open.`);
+      }
+      return;
+    }
+    settled = true;
+    settledAt = Date.now();
     job.exitCode = code;
     job.finishedAt = Date.now();
     if (job.status === "running") {
@@ -148,18 +173,12 @@ export function startJob(opts) {
       console.error("[opencode-mcp] onDone callback threw:", e.message ?? e);
     }
     job.events.emit("done");
-  });
+  }
+  child.on("exit", (code) => finalize(code, "exit"));
+  child.on("close", (code) => finalize(code, "close"));
   child.on("error", (err) => {
     job.errorMessage = err.message;
-    job.status = "failed";
-    job.finishedAt = Date.now();
-    recordUsage(job, assembledText(job).length);
-    try {
-      job.onDone?.(job);
-    } catch (e) {
-      console.error("[opencode-mcp] onDone callback threw:", e.message ?? e);
-    }
-    job.events.emit("done");
+    finalize(job.exitCode ?? 1, "error");
   });
 
   return id;

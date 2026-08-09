@@ -36,6 +36,29 @@ Jobs shell out to `opencode run --format json`, parsing its newline-delimited JS
 event stream (`text`, `step_finish`, `error`) to assemble the final response text,
 token usage, and cost as the process runs.
 
+## Completion detection uses `exit`, not just `close` (`src/jobs.js`)
+
+Node's `close` event on a spawned child only fires once ALL of its stdio file
+descriptors are closed — if `opencode run` leaves a descendant process running
+(a backgrounded bash command, another MCP server it connected to, an orphaned
+watcher) that inherited those pipes, `close` can be delayed by seconds,
+minutes, or indefinitely, even though `opencode`'s own process — and the real
+work it did (files written, answer produced) — finished long ago. Observed
+2026-08-09: a multi-agent orchestration session had jobs whose actual output
+files were already written, but `opencode_job_status` kept reporting them as
+still running, forcing a workaround of reading the files directly instead of
+trusting the job status. Reproduced in isolation: a child that backgrounds a
+`sleep` and exits fires `exit` at ~15ms but `close` at ~5000ms — a 5-second
+gap from one lingering subprocess, with no ceiling on how long a real one
+could hold it.
+
+Fixed by listening to both `exit` and `close`, settling the job on whichever
+fires first (`exit` will normally win when this scenario occurs; a `settled`
+guard prevents double-finalizing on the completely normal case where both
+fire within milliseconds of each other). When the second event does arrive
+much later, its gap is logged to stderr — real production evidence of how
+often/how badly this happens, not just a synthetic test's word for it.
+
 ## No push notifications — jobs don't "ping back" when done
 
 MCP tool calls are strictly request/response: this server has no way to interrupt

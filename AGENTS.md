@@ -72,6 +72,18 @@ prompt; `opencode_cancel_job` still exists separately for a job that's merely
 hung with no output at all (different failure mode — a hang never resolves to
 "failed" on its own, so it won't trigger the auto-block; cancel it yourself).
 
+## If a job's status seems stuck on "running" despite the work looking done
+
+Fixed 2026-08-09 — should be rare now, but if you ever see a job whose output
+files clearly exist/are complete while `opencode_job_status` still reports
+`"running"`, that was a real bug: `jobs.js` used to trust only Node's `close`
+event, which waits for ALL stdio pipes to close — delayed indefinitely if
+`opencode run` left a descendant process (backgrounded bash, another MCP
+connection) holding them open. It now also listens for `exit` (fires the
+instant the process itself terminates) and settles on whichever comes first.
+Don't work around a stuck status by reading files directly anymore — if you
+still see this, it's worth flagging as a regression, not routing around it.
+
 ## When something in opencode itself changes
 
 `opencode models`/`opencode models <provider> --verbose` are the source of
