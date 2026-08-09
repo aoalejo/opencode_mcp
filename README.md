@@ -230,10 +230,9 @@ scope specifically to what this MCP server delegated.
 Every `opencode-mcp` server process is tied 1:1 to the Claude Code session
 that spawned it, and an env var is fixed for that process's whole lifetime —
 so setting `OPENCODE_MCP_PIN_MODEL` (and optionally `OPENCODE_MCP_PIN_VARIANT`)
-when registering the server forces literally every `tier` resolution in that
-session to one fixed model, bypassing cost/score ranking and the failure
-blocklist entirely (an explicit `model` param on an individual call still
-overrides the pin, same as it overrides `tier`):
+when registering the server forces literally every `opencode_start_job` call
+in that session to one fixed model, bypassing cost/score ranking and the
+failure blocklist entirely:
 
 ```bash
 claude mcp add opencode --scope user \
@@ -241,6 +240,16 @@ claude mcp add opencode --scope user \
   --env OPENCODE_MCP_PIN_VARIANT=high \
   -- node /path/to/opencode-mcp/src/index.js
 ```
+
+**The pin is a HARD override — it wins even over an explicit `model` param.**
+That's deliberate: the whole point is "this session always uses X, no
+exceptions," including the exact case a pin exists for — you forget it's
+pinned and ask for something else by name (`model: "opencode-go/kimi-k3"`) or
+via `tier`. When the actual request differs from the pin, the response
+carries a `warning` field spelling out what was asked for vs what got forced,
+so the override is never silent — no `warning` field means nothing was
+overridden (including the normal case of a plain `tier` call, which a pin
+always "overrides" by design and doesn't warn about).
 
 Useful when you want predictable, consistent model usage for a session
 regardless of day-to-day ranking drift or in-flight failures. Whether a pin

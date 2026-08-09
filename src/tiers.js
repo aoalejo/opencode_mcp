@@ -183,19 +183,34 @@ export function pinnedModel() {
 }
 
 /**
- * Resolve a `{ model, tier }` request to `{ model, variant, band }`. `band`
- * is the full ordered fallback list for a `tier` request (winner first, then
- * next-best by score) with any live-blocked model+variant filtered out —
- * filtered here, not just at the last full refresh, so a failure recorded
- * seconds ago already affects the very next call, not just the next daily
- * recompute. Explicit `model` requests have no fallback (band is just
- * itself); the caller chose it on purpose.
+ * Resolve a `{ model, variant, tier }` request to `{ model, variant, band,
+ * warning }`. `band` is the full ordered fallback list for a `tier` request
+ * (winner first, then next-best by score) with any live-blocked model+variant
+ * filtered out — filtered here, not just at the last full refresh, so a
+ * failure recorded seconds ago already affects the very next call, not just
+ * the next daily recompute. Explicit `model` requests have no fallback (band
+ * is just itself); the caller chose it on purpose.
+ *
+ * A pin (see `pinnedModel`) is a HARD override: it wins even over an
+ * explicit `model` param, on purpose — the whole point is "this session
+ * always uses X, no exceptions," including the case the pin exists for in
+ * the first place: you forgot it was pinned and asked for something else by
+ * name (e.g. `model: "opencode-go/kimi-k3"`) or via `tier`. When the actual
+ * request differs from the pin, `warning` carries a human-readable note so
+ * the caller notices "I asked for kimi-k3 and got told something's forcing
+ * a different model" instead of silently getting a model they didn't expect.
  */
-export function resolveModel({ model, tier }) {
-  if (model) return { model, variant: null, band: [{ model, variant: null }] };
-
+export function resolveModel({ model, variant, tier }) {
   const pinned = pinnedModel();
-  if (pinned) return { ...pinned, band: [pinned] };
+  if (pinned) {
+    const requestedDiffers = model && (model !== pinned.model || (variant ?? null) !== (pinned.variant ?? null));
+    const warning = requestedDiffers
+      ? `OPENCODE_MCP_PIN_MODEL is active — requested "${model}${variant ? "/" + variant : ""}" was ignored; forced to "${pinned.model}${pinned.variant ? "/" + pinned.variant : ""}" instead.`
+      : null;
+    return { model: pinned.model, variant: pinned.variant, band: [pinned], warning };
+  }
+
+  if (model) return { model, variant: variant ?? null, band: [{ model, variant: variant ?? null }], warning: null };
 
   const tierName = tier ?? DEFAULT_TIER;
   if (!TIER_NAMES.includes(tierName)) {
@@ -213,5 +228,5 @@ export function resolveModel({ model, tier }) {
     throw new Error(`Every candidate for tier "${tierName}" is currently blocked. Run opencode_refresh_tiers or opencode_unblock_model.`);
   }
 
-  return { model: band[0].model, variant: band[0].variant ?? null, band };
+  return { model: band[0].model, variant: band[0].variant ?? null, band, warning: null };
 }

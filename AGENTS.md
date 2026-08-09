@@ -61,7 +61,12 @@ restarted. If you (or the user) see inconsistent model choices across
 sessions on the same day, check this before assuming the ranking itself is
 wrong. If the user wants guaranteed-consistent model usage for a session
 regardless of this, point them at `OPENCODE_MCP_PIN_MODEL` (README) — it
-forces every `tier` resolution in that session to one fixed model.
+forces every `opencode_start_job` call in that session to one fixed model,
+HARD-overriding even an explicit `model` param (that's the point: it catches
+you forgetting the pin and asking for something else). If you ever see a
+`warning` field in an `opencode_start_job` response, that means a pin is
+active and just overrode what you actually asked for — read it, it names
+both.
 
 ## Broken models are caught by real usage, not by probing — don't over-explain a `tier` failure
 

@@ -235,7 +235,7 @@ server.tool(
 
 server.tool(
   "opencode_start_job",
-  "Send a job (a prompt/task) to OpenCode to work on. Pick a `tier` (low/mid/high/max) instead of a specific model name — tiers are data-driven (see opencode_refresh_tiers): each is the cheapest model within 1% of the best arena score in its cost band on the OpenCode Go subscription (flat-rate, no marginal cost). Default to the lowest tier that can plausibly do the job; only reach for `max` when the task clearly needs the deepest reasoning available. Pass an explicit `model` instead of `tier` only when you specifically need something outside the tier map (see opencode_list_models). Output defaults to a clean hand-off (final result only, no narrated process) — set style:\"verbose\" only if you actually want to see the model's exploration/reasoning (e.g. debugging why a job did something unexpected).\n\nA `tier` pick that fails outright (real error, e.g. region-locked/disabled — not just slow) is automatically retried with the next-best candidate in the same cost pool, and gets excluded from future resolutions with exponential backoff (5min for a first failure, escalating toward 24h only if it keeps failing on repeated real attempts — see opencode_unblock_model to clear that early). This happens on real usage only — there is no separate probing step burning tokens just to check.\n\nIf the OPENCODE_MCP_PIN_MODEL env var is set on this server process, EVERY `tier` resolution uses that fixed model instead (ranking/blocklist bypassed entirely) — set at registration time to force one model for a whole session; check opencode_check_go_status's `pinnedModel` field to see if that's active right now.\n\nIMPORTANT — there is no push notification when a job finishes: MCP tool calls are strictly request/response, this server cannot interrupt the conversation on its own, and nothing resembling the native run_in_background task-notification exists here. Pass `waitMs` (recommended for most jobs — up to 540000ms/9min) to block this single call until the job actually finishes and get the full result back directly (also required for the automatic fallback above to retry within this same call). Omit `waitMs` only when you deliberately want fire-and-forget (returns just a jobId immediately) and will follow up yourself later with opencode_job_status — never assume you'll be told when it's done.",
+  "Send a job (a prompt/task) to OpenCode to work on. Pick a `tier` (low/mid/high/max) instead of a specific model name — tiers are data-driven (see opencode_refresh_tiers): each is the cheapest model within 1% of the best arena score in its cost band on the OpenCode Go subscription (flat-rate, no marginal cost). Default to the lowest tier that can plausibly do the job; only reach for `max` when the task clearly needs the deepest reasoning available. Pass an explicit `model` instead of `tier` only when you specifically need something outside the tier map (see opencode_list_models). Output defaults to a clean hand-off (final result only, no narrated process) — set style:\"verbose\" only if you actually want to see the model's exploration/reasoning (e.g. debugging why a job did something unexpected).\n\nA `tier` pick that fails outright (real error, e.g. region-locked/disabled — not just slow) is automatically retried with the next-best candidate in the same cost pool, and gets excluded from future resolutions with exponential backoff (5min for a first failure, escalating toward 24h only if it keeps failing on repeated real attempts — see opencode_unblock_model to clear that early). This happens on real usage only — there is no separate probing step burning tokens just to check.\n\nIf the OPENCODE_MCP_PIN_MODEL env var is set on this server process, EVERY `tier` resolution uses that fixed model instead (ranking/blocklist bypassed entirely) — set at registration time to force one model for a whole session; check opencode_check_go_status's `pinnedModel` field to see if that's active right now. The pin is a HARD override: it wins even over an explicit `model` param, specifically so that if you forget it's pinned and ask for a different model by name (or via `tier`), you still get the pinned one — but the response's `warning` field will say so, so it's never silent. No `warning` field means nothing was overridden.\n\nIMPORTANT — there is no push notification when a job finishes: MCP tool calls are strictly request/response, this server cannot interrupt the conversation on its own, and nothing resembling the native run_in_background task-notification exists here. Pass `waitMs` (recommended for most jobs — up to 540000ms/9min) to block this single call until the job actually finishes and get the full result back directly (also required for the automatic fallback above to retry within this same call). Omit `waitMs` only when you deliberately want fire-and-forget (returns just a jobId immediately) and will follow up yourself later with opencode_job_status — never assume you'll be told when it's done.",
   {
     prompt: z.string().describe("The task/message to send to opencode"),
     waitMs: z
@@ -284,27 +284,32 @@ server.tool(
     maybeAutoRefreshTiers();
     try {
       const prompt = style === "verbose" ? rest.prompt : rest.prompt + HANDOFF_SUFFIX;
-      const usingTier = !model;
+      // A pin forces the model regardless of what was asked for, so it never
+      // behaves like a genuine tier resolution (no fallback pool, no point
+      // blocking it on failure — the next call would just get forced back to
+      // the same pinned model anyway).
+      const usingTier = !model && !pinnedModel();
       const MAX_ATTEMPTS = 5;
       const attempts = [];
+      let warning;
 
       for (let i = 0; i < MAX_ATTEMPTS; i++) {
         // Re-resolve every attempt (not just once) so a failure blocked by
         // the previous iteration's onDone callback is already excluded —
         // this walks the fallback pool without needing to index into a
         // band snapshot that could go stale mid-loop.
-        const resolved = resolveModel({ model, tier });
-        const effectiveVariant = model ? (variant ?? null) : resolved.variant;
+        const resolved = resolveModel({ model, variant, tier });
+        warning = resolved.warning ?? warning;
         const effectiveTier = usingTier ? (tier ?? DEFAULT_TIER) : null;
         const jobId = startJob({
           ...rest,
           prompt,
           model: resolved.model,
-          variant: effectiveVariant,
+          variant: resolved.variant,
           tier: effectiveTier,
           onDone: recordJobOutcome,
         });
-        attempts.push({ jobId, model: resolved.model, variant: effectiveVariant });
+        attempts.push({ jobId, model: resolved.model, variant: resolved.variant });
 
         if (!waitMs) {
           return ok({
@@ -312,9 +317,10 @@ server.tool(
             status: "running",
             tier: effectiveTier,
             model: resolved.model,
-            variant: effectiveVariant,
+            variant: resolved.variant,
             style: style ?? "handoff",
             dir: rest.dir ?? null,
+            ...(warning ? { warning } : {}),
           });
         }
 
@@ -326,7 +332,9 @@ server.tool(
         // purpose), and "still running" past waitMs is not a failure, it's
         // just slow (e.g. kimi-k3/max legitimately takes 30-60s).
         if (summary.status !== "failed" || !usingTier) {
-          return ok(attempts.length > 1 ? { ...summary, attempts } : summary);
+          const result = attempts.length > 1 ? { ...summary, attempts } : summary;
+          if (warning) result.warning = warning;
+          return ok(result);
         }
         // onDone already blocked this model+variant synchronously before
         // waitForJob resolved (same close/error handler) — next loop

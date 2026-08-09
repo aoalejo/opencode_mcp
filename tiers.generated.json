@@ -1,55 +1,99 @@
 {
   "tiers": {
     "low": {
-      "model": "opencode-go/deepseek-v4-flash",
-      "variant": "high",
-      "label": "low — opencode-go/deepseek-v4-flash (arena #8, score 1581, $0.07/$0.14 per M tokens)",
-      "arenaScore": 1581,
-      "arenaRank": 8,
+      "model": "opencode-go/gpt-5.6-luna",
+      "variant": "xhigh",
+      "label": "low — opencode-go/gpt-5.6-luna (arena #22, score 1523, $0.1/$0.6 per M tokens)",
+      "arenaScore": 1523,
+      "arenaRank": 22,
       "cost": {
-        "input": 0.07,
-        "output": 0.14,
+        "input": 0.1,
+        "output": 0.6,
         "cache": {
-          "read": 0.0014,
-          "write": 0
+          "read": 0.01,
+          "write": 0.125
+        },
+        "tiers": [
+          {
+            "input": 0.2,
+            "output": 0.9,
+            "cache": {
+              "read": 0.02,
+              "write": 0.25
+            },
+            "tier": {
+              "type": "context",
+              "size": 272000
+            }
+          }
+        ],
+        "experimentalOver200K": {
+          "cache": {
+            "read": 0.02,
+            "write": 0.25
+          },
+          "input": 0.2,
+          "output": 0.9
         }
       },
       "inherited": false,
       "inheritedFrom": null
     },
     "mid": {
-      "model": "opencode-go/deepseek-v4-flash",
-      "variant": "high",
-      "label": "mid — opencode-go/deepseek-v4-flash (arena #8, score 1581, $0.07/$0.14 per M tokens)",
-      "arenaScore": 1581,
-      "arenaRank": 8,
+      "model": "opencode-go/gpt-5.6-luna",
+      "variant": "xhigh",
+      "label": "mid — opencode-go/gpt-5.6-luna (arena #22, score 1523, $0.1/$0.6 per M tokens)",
+      "arenaScore": 1523,
+      "arenaRank": 22,
       "cost": {
-        "input": 0.07,
-        "output": 0.14,
+        "input": 0.1,
+        "output": 0.6,
         "cache": {
-          "read": 0.0014,
-          "write": 0
+          "read": 0.01,
+          "write": 0.125
+        },
+        "tiers": [
+          {
+            "input": 0.2,
+            "output": 0.9,
+            "cache": {
+              "read": 0.02,
+              "write": 0.25
+            },
+            "tier": {
+              "type": "context",
+              "size": 272000
+            }
+          }
+        ],
+        "experimentalOver200K": {
+          "cache": {
+            "read": 0.02,
+            "write": 0.25
+          },
+          "input": 0.2,
+          "output": 0.9
         }
       },
       "inherited": true,
       "inheritedFrom": "low"
     },
     "high": {
-      "model": "opencode-go/deepseek-v4-flash",
-      "variant": "high",
-      "label": "high — opencode-go/deepseek-v4-flash (arena #8, score 1581, $0.07/$0.14 per M tokens)",
-      "arenaScore": 1581,
-      "arenaRank": 8,
+      "model": "opencode-go/glm-5.2",
+      "variant": "max",
+      "label": "high — opencode-go/glm-5.2 (arena #7, score 1588, $1.4/$4.4 per M tokens)",
+      "arenaScore": 1588,
+      "arenaRank": 7,
       "cost": {
-        "input": 0.07,
-        "output": 0.14,
+        "input": 1.4,
+        "output": 4.4,
         "cache": {
-          "read": 0.0014,
+          "read": 0.26,
           "write": 0
         }
       },
-      "inherited": true,
-      "inheritedFrom": "low"
+      "inherited": false,
+      "inheritedFrom": null
     },
     "max": {
       "model": "opencode-go/qwen3.8-max",
@@ -71,22 +115,6 @@
   },
   "bands": {
     "low": [
-      {
-        "model": "opencode-go/deepseek-v4-flash",
-        "variant": "high",
-        "cost": {
-          "input": 0.07,
-          "output": 0.14,
-          "cache": {
-            "read": 0.0014,
-            "write": 0
-          }
-        },
-        "contextWindow": 1000000,
-        "arenaScore": 1581,
-        "arenaRank": 8,
-        "arenaSlug": "deepseek-v4-flash-high"
-      },
       {
         "model": "opencode-go/gpt-5.6-luna",
         "variant": "xhigh",
@@ -159,22 +187,6 @@
       }
     ],
     "mid": [
-      {
-        "model": "opencode-go/deepseek-v4-flash",
-        "variant": "high",
-        "cost": {
-          "input": 0.07,
-          "output": 0.14,
-          "cache": {
-            "read": 0.0014,
-            "write": 0
-          }
-        },
-        "contextWindow": 1000000,
-        "arenaScore": 1581,
-        "arenaRank": 8,
-        "arenaSlug": "deepseek-v4-flash-high"
-      },
       {
         "model": "opencode-go/gpt-5.6-luna",
         "variant": "xhigh",
@@ -333,22 +345,6 @@
       }
     ],
     "high": [
-      {
-        "model": "opencode-go/deepseek-v4-flash",
-        "variant": "high",
-        "cost": {
-          "input": 0.07,
-          "output": 0.14,
-          "cache": {
-            "read": 0.0014,
-            "write": 0
-          }
-        },
-        "contextWindow": 1000000,
-        "arenaScore": 1581,
-        "arenaRank": 8,
-        "arenaSlug": "deepseek-v4-flash-high"
-      },
       {
         "model": "opencode-go/glm-5.2",
         "variant": "max",
@@ -658,22 +654,6 @@
         "arenaSlug": "glm-5.2-max"
       },
       {
-        "model": "opencode-go/deepseek-v4-flash",
-        "variant": "high",
-        "cost": {
-          "input": 0.07,
-          "output": 0.14,
-          "cache": {
-            "read": 0.0014,
-            "write": 0
-          }
-        },
-        "contextWindow": 1000000,
-        "arenaScore": 1581,
-        "arenaRank": 8,
-        "arenaSlug": "deepseek-v4-flash-high"
-      },
-      {
         "model": "opencode-go/grok-4.5",
         "variant": null,
         "cost": {
@@ -956,22 +936,6 @@
     ]
   },
   "candidates": [
-    {
-      "model": "opencode-go/deepseek-v4-flash",
-      "variant": "high",
-      "cost": {
-        "input": 0.07,
-        "output": 0.14,
-        "cache": {
-          "read": 0.0014,
-          "write": 0
-        }
-      },
-      "contextWindow": 1000000,
-      "arenaScore": 1581,
-      "arenaRank": 8,
-      "arenaSlug": "deepseek-v4-flash-high"
-    },
     {
       "model": "opencode-go/gpt-5.6-luna",
       "variant": "xhigh",
@@ -1305,6 +1269,8 @@
     "opencode-go/qwen3.7-max",
     "opencode-go/qwen3.7-plus"
   ],
-  "blocked": [],
-  "computedAt": 1786244387991
+  "blocked": [
+    "opencode-go/deepseek-v4-flash"
+  ],
+  "computedAt": 1786263373841
 }
