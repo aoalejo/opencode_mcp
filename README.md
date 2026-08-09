@@ -225,6 +225,30 @@ This log is separate from (and complements) OpenCode's own `opencode stats
 started it — use that for the full-machine picture, use `opencode_usage_stats` to
 scope specifically to what this MCP server delegated.
 
+## Pinning one model for a whole session (`OPENCODE_MCP_PIN_MODEL`)
+
+Every `opencode-mcp` server process is tied 1:1 to the Claude Code session
+that spawned it, and an env var is fixed for that process's whole lifetime —
+so setting `OPENCODE_MCP_PIN_MODEL` (and optionally `OPENCODE_MCP_PIN_VARIANT`)
+when registering the server forces literally every `tier` resolution in that
+session to one fixed model, bypassing cost/score ranking and the failure
+blocklist entirely (an explicit `model` param on an individual call still
+overrides the pin, same as it overrides `tier`):
+
+```bash
+claude mcp add opencode --scope user \
+  --env OPENCODE_MCP_PIN_MODEL=opencode-go/deepseek-v4-flash \
+  --env OPENCODE_MCP_PIN_VARIANT=high \
+  -- node /path/to/opencode-mcp/src/index.js
+```
+
+Useful when you want predictable, consistent model usage for a session
+regardless of day-to-day ranking drift or in-flight failures. Whether a pin
+is active (and what it's pinned to) is visible in `opencode_check_go_status`'s
+`pinnedModel` field. Note this only affects the *session that registers it
+this way* — concurrent sessions each run their own server process with their
+own env, so this isn't a machine-wide setting.
+
 ## Install
 
 ```bash
@@ -241,7 +265,11 @@ Replace `/path/to/opencode-mcp` with wherever you cloned this repo (e.g. run
 `pwd` from inside it to get the absolute path).
 
 Takes effect in new Claude Code sessions (an already-running session won't pick up
-newly registered servers).
+newly registered servers). This also means **different concurrent sessions can be
+running different versions of this server's code** — a session started before a
+fix landed keeps running its old behavior until it's restarted. If you see
+inconsistent model choices across sessions on the same day, this is the first
+thing to check, not necessarily a ranking bug.
 
 ## Safety note
 

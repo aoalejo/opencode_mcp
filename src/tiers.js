@@ -166,6 +166,23 @@ export function listBlocked() {
 }
 
 /**
+ * Set OPENCODE_MCP_PIN_MODEL (+ optional OPENCODE_MCP_PIN_VARIANT) when
+ * registering this server (`claude mcp add opencode --env
+ * OPENCODE_MCP_PIN_MODEL=opencode-go/deepseek-v4-flash -- ...`) to force
+ * EVERY tier resolution in that session to one fixed model — bypasses
+ * ranking, cost pools, and the failure blocklist entirely. Env vars are
+ * fixed for a process's whole lifetime, and one opencode-mcp process = one
+ * Claude Code session, so this is literally "always this model, this
+ * session." Explicit `model` params on individual calls still take
+ * precedence over the pin, same as they do over `tier`.
+ */
+export function pinnedModel() {
+  const model = process.env.OPENCODE_MCP_PIN_MODEL;
+  if (!model) return null;
+  return { model, variant: process.env.OPENCODE_MCP_PIN_VARIANT || null };
+}
+
+/**
  * Resolve a `{ model, tier }` request to `{ model, variant, band }`. `band`
  * is the full ordered fallback list for a `tier` request (winner first, then
  * next-best by score) with any live-blocked model+variant filtered out —
@@ -176,6 +193,9 @@ export function listBlocked() {
  */
 export function resolveModel({ model, tier }) {
   if (model) return { model, variant: null, band: [{ model, variant: null }] };
+
+  const pinned = pinnedModel();
+  if (pinned) return { ...pinned, band: [pinned] };
 
   const tierName = tier ?? DEFAULT_TIER;
   if (!TIER_NAMES.includes(tierName)) {

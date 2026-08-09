@@ -54,6 +54,15 @@ premium for nothing. This refreshes automatically once a day (`src/tiers.js`'s
 the mapping you saw last session still holds; a model that was `max` yesterday
 may not be today if the leaderboard, Go lineup, or a recent failure moved it.
 
+Concurrent Claude Code sessions each run their OWN opencode-mcp server
+process, started with whatever code existed at THAT session's start — a
+session running since before a fix landed keeps the old behavior until it's
+restarted. If you (or the user) see inconsistent model choices across
+sessions on the same day, check this before assuming the ranking itself is
+wrong. If the user wants guaranteed-consistent model usage for a session
+regardless of this, point them at `OPENCODE_MCP_PIN_MODEL` (README) — it
+forces every `tier` resolution in that session to one fixed model.
+
 ## Broken models are caught by real usage, not by probing — don't over-explain a `tier` failure
 
 There is no proactive live-probe anymore (removed 2026-08-05 — it cost real
