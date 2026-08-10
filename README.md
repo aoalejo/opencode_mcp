@@ -24,8 +24,9 @@ today.
 - `opencode_refresh_tiers` — recompute the low/mid/high/max tier map from live data (see "Model tiers" below). Pure local computation, effectively free. On-demand only, not routine (it already runs automatically once a day).
 - `opencode_unblock_model` — manually clear a model from the failure blocklist (exponential backoff, not a flat block — see "Automatic failure handling" below) and recompute immediately, e.g. right after re-enabling it in the OpenCode dashboard.
 - `opencode_start_job` — send a prompt/task to a `tier` (low/mid/high/max) or an explicit `model`+`variant`, in a given directory. Pass `waitMs` to block until it finishes and get the full result back in this same call (recommended — see "No push notifications" below); omit it for fire-and-forget (returns just a `jobId`).
-- `opencode_job_status` — check on a job started earlier; pass `waitMs` to block until it finishes.
-- `opencode_list_jobs` — list all jobs started this server session.
+- `opencode_job_status` — check on a job started earlier (works across a server restart or a different process — see "Job state survives a restart" below); pass `waitMs` to block until it finishes.
+- `opencode_resume_job` — nudge an existing opencode session to continue instead of starting over, e.g. after a transient hiccup derailed it. See "Resuming a derailed job" below.
+- `opencode_list_jobs` — list all jobs started this server session (in-memory only, unlike the two above).
 - `opencode_usage_stats` — aggregate tokens/cost/response-chars across *every* job this server has ever delegated (persisted, survives across sessions/processes — unlike `opencode_list_jobs`). See "Usage tracking" below.
 - `opencode_cancel_job` — kill a running job.
 - `opencode_list_providers` — configured credentials (e.g. OpenCode Zen, OpenCode Go, OpenRouter).
@@ -81,6 +82,44 @@ that will never arrive:
   back immediately, do other work, then call `opencode_job_status({ jobId })`
   yourself later. There is no notification to wait for — if you don't check
   back, the result just sits there until you do (or the server process exits).
+
+## Job state survives a restart (`src/job-store.js`)
+
+In-memory-only job tracking means the instant this MCP server process
+restarts or crashes — or a DIFFERENT process (another Claude Code session)
+tries to look up a job it didn't start — `opencode_job_status` returns `No
+job with id "..."`, even though the real opencode session and everything it
+produced (files written, answer given) are completely intact. Observed
+2026-08-09 right after this exact scenario.
+
+Every job's state (model, variant, dir, sessionId, tokens, cost, and the
+assembled response text) is checkpointed to disk at
+`~/.local/share/opencode-mcp/jobs/<jobId>.json` on every `step_finish` event
+and on final completion/failure — frequent enough that a killed process still
+leaves recent progress recoverable, not so frequent it's meaningful I/O
+overhead. `getJob`/`opencode_job_status`/`opencode_resume_job` all fall back
+to this file when a job isn't in the current process's memory. `opencode_list_jobs`
+does NOT include disk-only jobs (it only enumerates what THIS process
+remembers) — it's for browsing the current session's own work, not a full
+history; look a specific job up by id instead if you know it.
+
+## Resuming a derailed job (`opencode_resume_job`)
+
+Sometimes a job goes in circles, loses context, or a transient hiccup (a
+network blip, a tool call that failed weirdly) visibly derails it without an
+outright process failure — the kind of thing you'd fix by hand in the
+opencode TUI by finding the session and typing "hubo un error de red,
+continuá desde donde quedaste." `opencode_resume_job` does exactly that
+programmatically: it starts a new job continuing the SAME opencode session
+(via `--session <id>`, not `--continue`, so it targets a specific session
+rather than "whatever was last") with a nudge prompt (a sensible default, or
+your own if you know what actually went wrong).
+
+Pass `jobId` (works across a restart/different process, per the above) or
+`sessionId` directly. Verified end-to-end, including across a simulated
+server restart: a fresh process with zero shared memory recovered a job's
+`sessionId` from disk, resumed it, and the model correctly recalled context
+from before the "restart."
 
 ## Clean hand-off output, not a transcript
 

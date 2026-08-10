@@ -98,6 +98,25 @@ instant the process itself terminates) and settles on whichever comes first.
 Don't work around a stuck status by reading files directly anymore — if you
 still see this, it's worth flagging as a regression, not routing around it.
 
+## Recovering a job whose process/memory is gone, or one that's derailed
+
+If `opencode_job_status`/`opencode_list_jobs` says "No job with id ..." — this
+process may have restarted (or it's a job a different Claude Code session
+started). Try the same jobId again anyway: job state is checkpointed to disk
+(`src/job-store.js`) and read back automatically if it's not in this
+process's memory, so it usually still resolves. Only if that genuinely fails
+do you need `sessionId` directly (from `opencode session list` or wherever
+you last saw it).
+
+If a job is technically still running but seems to have gone in circles or
+lost the plot (not a hard failure — those already auto-retry, see above),
+`opencode_resume_job` sends a nudge to continue that same opencode session
+instead of starting over from scratch, wasting whatever progress it already
+made. This is the MCP equivalent of the manual TUI recovery: find the
+session, tell it there was a hiccup, let it pick back up. Prefer this over
+just re-running `opencode_start_job` fresh when you suspect the underlying
+work was mostly fine and something external (not the task itself) derailed it.
+
 ## When something in opencode itself changes
 
 `opencode models`/`opencode models <provider> --verbose` are the source of

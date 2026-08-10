@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { recordUsage } from "./usage.js";
+import { persistJob, loadPersistedJob } from "./job-store.js";
 
 /** @type {Map<string, Job>} */
 const jobs = new Map();
@@ -51,6 +52,10 @@ function handleEvent(job, event) {
         job.tokens.reasoning += t.reasoning ?? 0;
       }
       if (typeof event.part?.cost === "number") job.cost += event.part.cost;
+      // Checkpoint to disk here (not on every raw chunk) — frequent enough
+      // that a killed/restarted server process still leaves recent progress
+      // recoverable, not so frequent it's meaningful disk I/O overhead.
+      persistJob(job, assembledText(job));
       break;
     }
     case "error":
@@ -129,6 +134,7 @@ export function startJob(opts) {
     events: new EventEmitter(),
   };
   jobs.set(id, job);
+  persistJob(job, ""); // initial record — even a job that dies before any output is at least known to have started
 
   child.stdout.on("data", (chunk) => processChunk(job, chunk.toString("utf8")));
   child.stderr.on("data", (chunk) => {
@@ -166,7 +172,9 @@ export function startJob(opts) {
     if (job.status === "running") {
       job.status = code === 0 && !job.errorMessage ? "completed" : "failed";
     }
-    recordUsage(job, assembledText(job).length);
+    const finalText = assembledText(job);
+    recordUsage(job, finalText.length);
+    persistJob(job, finalText);
     try {
       job.onDone?.(job);
     } catch (e) {
@@ -184,8 +192,16 @@ export function startJob(opts) {
   return id;
 }
 
+/**
+ * Falls back to the on-disk snapshot (see job-store.js) when this process
+ * has no live record — either it restarted since the job ran, or a
+ * DIFFERENT process (another Claude Code session) started it. The returned
+ * object has no `child`/`events` (the real process is gone or elsewhere) but
+ * carries everything jobSummary/opencode_resume_job need: model, variant,
+ * dir, sessionId, the assembled text as of its last checkpoint, and status.
+ */
 export function getJob(id) {
-  return jobs.get(id);
+  return jobs.get(id) ?? loadPersistedJob(id);
 }
 
 export function listJobs() {
@@ -236,6 +252,10 @@ export function waitForJob(id, timeoutMs) {
 }
 
 export function jobSummary(job) {
+  // A live job has `textParts` (Map, assembled on demand); a job reloaded
+  // from disk via loadPersistedJob already has a plain `text` string (and no
+  // child process, so nothing left to assemble from).
+  const text = job.textParts ? assembledText(job) : (job.text ?? "");
   return {
     jobId: job.id,
     status: job.status,
@@ -250,10 +270,10 @@ export function jobSummary(job) {
     tokens: job.tokens,
     cost: job.cost,
     errorMessage: job.errorMessage,
-    stderrTail: job.stderr ? job.stderr.slice(-2000) : undefined,
+    stderrTail: job.stderrTail ?? (job.stderr ? job.stderr.slice(-2000) : undefined),
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
     durationMs: (job.finishedAt ?? Date.now()) - job.startedAt,
-    text: assembledText(job),
+    text,
   };
 }

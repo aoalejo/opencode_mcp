@@ -352,7 +352,7 @@ server.tool(
 
 server.tool(
   "opencode_job_status",
-  "Check on a job started with opencode_start_job. Returns current status plus whatever output text has streamed in so far. Pass waitMs to block until it finishes (or the timeout elapses) instead of polling repeatedly.",
+  "Check on a job started with opencode_start_job. Returns current status plus whatever output text has streamed in so far. Pass waitMs to block until it finishes (or the timeout elapses) instead of polling repeatedly. Works even for a job this server process didn't start itself (a prior process that restarted, or a different Claude Code session) — every job's state is checkpointed to disk on each step and read back from there if it's not in this process's memory, so a server restart doesn't turn a job irrecoverable.",
   {
     jobId: z.string(),
     waitMs: z
@@ -371,9 +371,70 @@ server.tool(
   }
 );
 
+const DEFAULT_RESUME_MESSAGE =
+  "Parece que hubo una interrupción (corte de red o error transitorio), no un problema con la tarea en sí. " +
+  "Continuá el trabajo exactamente desde donde quedaste — no repitas pasos ya hechos ni vuelvas a leer " +
+  "archivos que ya leíste, salvo que necesites confirmar algo puntual. Si ya habías terminado, decime " +
+  "directamente el resultado final.";
+
+server.tool(
+  "opencode_resume_job",
+  'Nudge a specific opencode SESSION to continue instead of starting fresh — the same recovery you\'d do by hand in the opencode TUI ("busco la sesión, le mando un mensaje de que hubo un error, y sigue donde quedó"), just callable from here. Useful when a job seems to have gone in circles, lost context, or you suspect a transient hiccup derailed it, and starting over would waste the progress it already made.\n\nPass `jobId` to resume a job by id — this works even if a different process started it or the server has since restarted (job state is checkpointed to disk, read back automatically); reuses its `model`/`variant`/`dir` unless you override them. Pass `sessionId` directly instead if you only have that (e.g. from `opencode session list`) and no jobId — in that case `model`/`variant` are optional since opencode reuses whatever the session already had, but `dir` is needed unless it\'s the current working directory. `message` defaults to a generic "there was a network hiccup, continue where you left off, don\'t repeat finished work" nudge — override it with something specific if you know what actually went wrong. This starts a genuinely new job (new jobId) continuing that session\'s existing conversation, not a new unrelated one — pass `waitMs` same as opencode_start_job.',
+  {
+    jobId: z.string().optional().describe("A jobId this server process already knows about (from a prior opencode_start_job call this session). Provide this OR sessionId."),
+    sessionId: z.string().optional().describe('opencode\'s own session id (e.g. "ses_...") to continue directly — works even for a job from a different process/session. Provide this OR jobId.'),
+    message: z.string().optional().describe("Nudge prompt. Defaults to a generic transient-interruption recovery message if omitted."),
+    dir: z.string().optional().describe("Working directory for the session. Required if sessionId is given without a resolvable jobId; inferred from the job otherwise."),
+    model: z.string().optional().describe('Explicit "provider/model" override. Optional — omit to let opencode reuse whichever model the session already had.'),
+    variant: z.string().optional().describe("Reasoning-effort variant to pair with an explicit model override."),
+    waitMs: z
+      .number()
+      .int()
+      .min(0)
+      .max(540000)
+      .optional()
+      .describe("Block until this resume job finishes or this many ms elapse (max 540000 = 9 min), same as opencode_start_job. Default 0: fire-and-forget."),
+  },
+  async ({ jobId, sessionId, message, dir, model, variant, waitMs }) => {
+    try {
+      const priorJob = jobId ? getJob(jobId) : null;
+      if (jobId && !priorJob) return err(`No job with id "${jobId}" found (checked both this process's memory and its disk checkpoint) — pass sessionId directly instead.`);
+
+      const resolvedSessionId = sessionId ?? priorJob?.sessionId;
+      if (!resolvedSessionId) {
+        return err(
+          priorJob
+            ? `Job "${jobId}" never got a sessionId from opencode (it may have failed before establishing one) — nothing to resume.`
+            : "Provide either jobId or sessionId."
+        );
+      }
+
+      const resolvedDir = dir ?? priorJob?.dir;
+      const resolvedModel = model ?? priorJob?.model;
+      const resolvedVariant = model ? (variant ?? null) : (priorJob?.variant ?? null);
+
+      const newJobId = startJob({
+        prompt: message || DEFAULT_RESUME_MESSAGE,
+        sessionId: resolvedSessionId,
+        dir: resolvedDir,
+        model: resolvedModel,
+        variant: resolvedVariant,
+      });
+
+      if (waitMs) {
+        await waitForJob(newJobId, waitMs);
+        return ok(jobSummary(getJob(newJobId)));
+      }
+      return ok({ jobId: newJobId, status: "running", resumedSessionId: resolvedSessionId, dir: resolvedDir ?? null });
+    } catch (e) {
+      return err(String(e.message ?? e));
+    }
+  }
+);
+
 server.tool(
   "opencode_list_jobs",
-  "List all jobs started this server session, with their current status.",
+  "List all jobs started this server session, with their current status. Unlike opencode_job_status/opencode_resume_job (which fall back to disk), this only lists what THIS process has in memory — jobs from a prior process/restart won't appear here even though they're individually still look-up-able by jobId.",
   {},
   async () => {
     return ok({ jobs: listJobs().map(jobSummary) });
