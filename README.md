@@ -32,6 +32,10 @@ today.
 - `opencode_list_providers` — configured credentials (e.g. OpenCode Zen, OpenCode Go, OpenRouter).
 - `opencode_list_models` — list `provider/model` ids, optionally filtered by provider. Only needed when a job requires a model outside the tier map.
 - `opencode_model_info` — verbose metadata (cost, context window) for one model.
+- `opencode_audit` — fan N forced-read-only reviewers out over uncommitted changes (or a commit range), confidence-ranked and adversarially re-checked. See "Multi-agent orchestration" below.
+- `opencode_investigate` — same read-only fan-out/reconcile shape as `opencode_audit`, but for an arbitrary question instead of a diff.
+- `opencode_goal` — sequential passes toward a goal, with real lint/test output fed to each next pass, verified read-only at the end.
+- `opencode_job` — runs `opencode_goal` then `opencode_audit` on whatever it produced, and hands both results back untouched.
 
 Jobs shell out to `opencode run --format json`, parsing its newline-delimited JSON
 event stream (`text`, `step_finish`, `error`) to assemble the final response text,
@@ -296,6 +300,170 @@ is active (and what it's pinned to) is visible in `opencode_check_go_status`'s
 `pinnedModel` field. Note this only affects the *session that registers it
 this way* — concurrent sessions each run their own server process with their
 own env, so this isn't a machine-wide setting.
+
+## Multi-agent orchestration: audit / investigate / goal / job (`src/orchestrate.js`)
+
+One model call is one opinion. These four tools spend extra parallel calls —
+close to free when `OPENCODE_MCP_PIN_MODEL` points at a local model, since
+sending 1 request or 16 costs the same wall-clock time and money — to get a
+more reliable answer than a single pass would: many independent read-only
+reviewers instead of one, confidence-ranked instead of blindly trusted,
+adversarially re-checked instead of taken at face value. `defaultWidth()`
+detects whether the resolved model is actually the free local one (or a paid
+tier) and scales default participant counts up or down accordingly, so a
+paid-tier call doesn't silently balloon in cost just because the code assumes
+parallelism is free.
+
+### One-time setup: the `mcp-readonly` opencode agent
+
+Every read-only reviewer/aggregator/verifier across all four tools runs as a
+dedicated opencode agent, **`mcp-readonly`**, registered once in
+`~/.config/opencode/opencode.jsonc` (a machine-level config file, NOT part of
+this repo — each machine running this MCP server needs this added once):
+
+```jsonc
+{
+  "agent": {
+    "mcp-readonly": {
+      "mode": "primary",
+      "description": "Forced read-only agent used by opencode-mcp's audit/investigate/goal-verify commands — cannot edit files, run shell commands, or invoke skills/sub-tasks.",
+      "permission": {
+        "read": "allow",
+        "grep": "allow",
+        "glob": "allow",
+        "list": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "edit": "deny",
+        "bash": "deny",
+        "task": "deny",
+        "skill": "deny",
+        "todowrite": "deny"
+      }
+    }
+  }
+}
+```
+
+**`mode` must be `"primary"`, not `"subagent"`.** `opencode run --agent
+<name>` silently falls back to the default agent (defeating the whole
+read-only guarantee, with only a stderr warning to notice it) if the named
+agent isn't a primary one — found this the hard way while testing.
+Verify it registered with `opencode agent list` — it should show
+`mcp-readonly (primary)`.
+
+### `opencode_audit` and `opencode_investigate`
+
+Both fan N participants out **in parallel**, all forced onto `mcp-readonly`
+(a real permission-engine guarantee, not a prompt asking nicely), then run
+them through the same confidence-ranked reconciliation:
+
+1. **Round 0**: N participants' independent findings go to ONE aggregator,
+   which builds a single report and explicitly notes how many participants
+   corroborated each finding — 2+ is CONFIRMED, exactly 1 is LOW CONFIDENCE.
+2. **Adversarial round(s)** (`depth` times, default 1): a FRESH batch of N
+   reviewers gets ONLY the current report, framed as "a low-confidence agent
+   reported this, your job is to determine its falseness" — each
+   independently tries to refute the low-confidence items using its own
+   read-only access to the real code. One more aggregator then reconciles
+   [previous report + all adversarial reviews], promoting survivors to
+   "adversarially confirmed" and calling out (never silently dropping)
+   anything refuted. `depth=0` skips this; `depth=2` repeats the whole
+   round-then-reaggregate step twice for higher-stakes reviews.
+
+`opencode_audit` reviews a git diff — uncommitted changes by default, or
+everything since `baseCommit` (a whole branch/PR) when given. If the diff is
+too large (~100k+ tokens) to hand every participant in full, participants
+each get a distinct subset of the changed files instead. Each participant is
+also assigned a rotating "lens" (correctness, security, simplification,
+efficiency, tests, consistency, error handling, readability) so N reviews of
+the *same* diff under the *same* (often deterministic, local) model actually
+diverge instead of producing near-duplicate output.
+
+`opencode_investigate` is the same shape driven by an arbitrary `prompt`
+instead of a diff — use it to have several independent agents look into one
+question and get back a reconciled answer, e.g. "does the test suite
+actually cover the new drill-down interaction, or just that it renders?"
+
+### `opencode_goal`
+
+**Sequential, not parallel** — these agents actually edit code, and running
+them concurrently in the same working tree would corrupt each other's
+changes. (An earlier version ran independent parallel attempts judged by a
+panel — reverted after real testing showed the judge panel, being the same
+weak model, reject genuinely correct candidates outright; see the git
+history around `runGoal` if curious.) Pass 1 attempts the goal fresh; each
+later pass continues the *previous* pass's own opencode session.
+
+The actual defense against a weak model trusting its own "done!" self-report:
+after **every** pass, real `lint`/`test` commands run against `dir` — a
+mechanical, ground-truth signal, not another LLM's opinion — and the genuine
+pass/fail output gets attached to the *next* pass's prompt. Commands
+auto-detect from `dir`'s `package.json` (`scripts.lint`/`scripts.test`) if
+not given explicitly; pass `lintCommand`/`testCommand` to override, or
+explicit `null` to force-disable one. Once every pass finishes, one final
+`mcp-readonly` pass inspects the repo's actual current state (not the
+passes' self-reports) and returns a consolidated verification report.
+
+### `opencode_job`
+
+Runs `opencode_goal` to completion, then immediately runs `opencode_audit` on
+whatever it left uncommitted, and returns **both results verbatim** — it
+does not interpret the QA findings, decide they're serious, or trigger
+another goal pass on its own. Deciding what to do with what QA found (fix it,
+ignore it, ask the user) is explicitly the caller's job, not this tool's —
+matches this whole project's stance of surfacing information rather than
+silently resolving it on the caller's behalf.
+
+### Try it yourself
+
+```bash
+mkdir -p /tmp/opencode-mcp-demo && cd /tmp/opencode-mcp-demo
+git init -q && git config user.email "demo@demo.com" && git config user.name "Demo"
+
+cat > calc.js << 'EOF'
+function multiply(a, b) {
+  return a * b;
+}
+module.exports = { multiply };
+EOF
+
+cat > calc.test.js << 'EOF'
+const assert = require("assert");
+const { multiply, divide } = require("./calc");
+assert.strictEqual(multiply(2, 3), 6);
+assert.strictEqual(divide(10, 2), 5);
+console.log("all tests passed");
+EOF
+
+cat > package.json << 'EOF'
+{
+  "name": "opencode-mcp-demo",
+  "scripts": {
+    "test": "node calc.test.js",
+    "lint": "node -e \"require('./calc.js'); console.log('lint ok')\""
+  }
+}
+EOF
+
+git add -A && git commit -q -m "initial"
+```
+
+Then, from Claude Code (with this MCP server registered — see "Register with
+Claude Code" below), ask something like:
+
+> Use opencode_job on /tmp/opencode-mcp-demo with the goal "the test suite in
+> calc.test.js is failing — fix calc.js so `npm test` and `npm run lint` both
+> pass," then tell me what happened.
+
+Expected: pass 1 adds the missing `divide` function, the lint/test checks
+that run right after come back green, and the QA audit that follows finds
+nothing wrong with the (correct, minimal) diff. To see the reconciliation
+mechanism do real work instead of rubber-stamping, try `opencode_audit`
+directly on a deliberately messier diff — introduce an actual bug (e.g. an
+inverted comparison or a copy-pasted line) before auditing, and check that it
+shows up as CONFIRMED (if more than one lens/reviewer flags it) rather than
+buried in a wall of text.
 
 ## Install
 

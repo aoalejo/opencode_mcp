@@ -21,6 +21,7 @@ import {
 } from "./tiers.js";
 import { computeTierMap } from "./rank.js";
 import { readUsageLog, summarizeUsage } from "./usage.js";
+import { runAudit, runInvestigate, runGoal, runJob, MAX_PARTICIPANTS } from "./orchestrate.js";
 
 /**
  * Mark a tier's final winner as `inherited` when a strictly cheaper tier's
@@ -472,6 +473,105 @@ server.tool(
     const found = cancelJob(jobId);
     if (!found) return err(`No job with id "${jobId}"`);
     return ok(jobSummary(getJob(jobId)));
+  }
+);
+
+const ORCHESTRATION_WAIT_MS = 480000; // 8 min per participant — leaves headroom under the 9-min per-job cap
+
+server.tool(
+  "opencode_audit",
+  `Fan out N (default 16, wider — up to 24 — when the free local pinned model is active; stays at this default otherwise, max ${MAX_PARTICIPANTS}) independent read-only reviewers over a diff — by default the CURRENT uncommitted changes (\`git diff HEAD\` in \`dir\`), or everything since \`baseCommit\` when given (review a whole branch/PR instead of just what's uncommitted). Computed once by this tool, not left for each agent to run itself. If the diff is large (~100k+ tokens), participants stop getting the full diff and instead each review a distinct subset of the changed files independently (still parallel, just partitioned). Each reviewer is forced onto a dedicated "mcp-readonly" opencode agent (registered in opencode.jsonc with edit/bash/task/skill all denied at the permission-engine level — a real guarantee, not a prompt request) and assigned a rotating lens (correctness, security, simplification, efficiency, tests, consistency, error handling, readability) so N reviews of the same diff under the same model actually diverge instead of duplicating each other.\n\nReconciliation: one aggregator reads all N participants' findings and builds a single report, explicitly noting how many participants corroborated each finding (2+ = confirmed, 1 = low confidence — not silently trusted). Then, \`depth\` times (default 1), a FRESH batch of N adversarial reviewers gets ONLY that report plus the framing "a low-confidence agent reported this, your job is to determine its falseness" — each independently tries to refute the low-confidence items using its own read-only access to the code — and one more aggregator reconciles [previous report + all adversarial reviews] into an updated report, promoting anything that survived (labeled "adversarially confirmed") and calling out (never silently dropping) anything refuted. \`depth=0\` skips the adversarial step entirely; \`depth=2\` repeats the whole adversarial-round-then-reaggregate step twice, for higher-criticality reviews. Returns the final report text plus per-round job metadata. If there are no changes, returns immediately with no jobs spawned.`,
+  {
+    count: z.number().int().min(1).max(MAX_PARTICIPANTS).optional().describe(`Number of parallel reviewers (reused as the adversarial-round size too). Default 16 (wider — up to 24 — when the free local pinned model is active; stays at this default otherwise).`),
+    dir: z.string().optional().describe("Absolute path of the git repo to audit. Defaults to this server's cwd."),
+    baseCommit: z.string().optional().describe('Review everything since this commit ("git diff <baseCommit> HEAD") instead of just uncommitted changes — e.g. to review a whole feature branch/PR.'),
+    focus: z.string().optional().describe("Optional extra instruction appended to every reviewer's prompt (e.g. \"pay special attention to the auth changes\")."),
+    tier: z.enum(TIER_NAMES).optional().describe(`Tier for every participant AND every aggregator/adversarial job. Default "${DEFAULT_TIER}". Ignored if \`model\` is set or a pin is active.`),
+    model: z.string().optional().describe('Explicit "provider/model" override for every participant and reconciliation job.'),
+    variant: z.string().optional().describe("Reasoning-effort variant to pair with an explicit model."),
+    waitMs: z.number().int().min(1000).max(540000).optional().describe(`Per-job wait cap. Default ${ORCHESTRATION_WAIT_MS}.`),
+    depth: z.number().int().min(0).max(3).optional().describe(`Adversarial-round-then-reaggregate repetitions (default 1). 0 skips adversarial verification entirely (fastest/cheapest); 1 = one round; 2 = two rounds for higher-criticality reviews (more rigor, more cost).`),
+  },
+  async ({ count, dir, baseCommit, focus, tier, model, variant, waitMs, depth }) => {
+    try {
+      return ok(await runAudit({ count, dir, baseCommit, focus, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS, depth: depth ?? 1 }));
+    } catch (e) {
+      return err(String(e.message ?? e));
+    }
+  }
+);
+
+server.tool(
+  "opencode_investigate",
+  `Same read-only fan-out / confidence-ranked reconciliation shape as opencode_audit, but driven by an arbitrary \`prompt\` instead of a git diff — use this to have several independent agents investigate ONE question/topic in parallel and get back one reconciled answer grounded in evidence. Fans out N (default 5, wider — up to 16 — when the free local pinned model is active; stays at this default otherwise, max ${MAX_PARTICIPANTS}) participants, each forced onto the "mcp-readonly" agent (edit/bash/task/skill denied at the permission level) with a light diversifier nudge so they don't just duplicate each other's angle.\n\nReconciliation: one aggregator builds a single report from all N participants' findings, explicitly noting how many corroborated each finding (2+ = confirmed, 1 = low confidence). Then, \`depth\` times (default 1), a FRESH batch of N adversarial reviewers gets ONLY that report plus the framing "a low-confidence agent reported this, your job is to determine its falseness" and independently tries to refute the low-confidence items — one more aggregator then reconciles [previous report + adversarial reviews] into an updated report, promoting survivors ("adversarially confirmed") and calling out (never silently dropping) anything refuted. \`depth=0\` skips adversarial verification; \`depth=2\` repeats the round twice for higher-criticality investigations. Returns the final report text plus per-round job metadata.`,
+  {
+    prompt: z.string().describe("The question/topic every participant investigates independently."),
+    count: z.number().int().min(1).max(MAX_PARTICIPANTS).optional().describe("Number of parallel investigators (reused as the adversarial-round size too). Default 5 (wider — up to 16 — when the free local pinned model is active; stays at this default otherwise)."),
+    dir: z.string().optional().describe("Absolute path of the project directory. Defaults to this server's cwd."),
+    tier: z.enum(TIER_NAMES).optional().describe(`Tier for every participant AND every aggregator/adversarial job. Default "${DEFAULT_TIER}". Ignored if \`model\` is set or a pin is active.`),
+    model: z.string().optional().describe('Explicit "provider/model" override for every participant and reconciliation job.'),
+    variant: z.string().optional().describe("Reasoning-effort variant to pair with an explicit model."),
+    waitMs: z.number().int().min(1000).max(540000).optional().describe(`Per-job wait cap. Default ${ORCHESTRATION_WAIT_MS}.`),
+    depth: z.number().int().min(0).max(3).optional().describe(`Adversarial-round-then-reaggregate repetitions (default 1). 0 skips adversarial verification entirely (fastest/cheapest); 1 = one round; 2 = two rounds for higher-criticality investigations (more rigor, more cost).`),
+  },
+  async ({ prompt, count, dir, tier, model, variant, waitMs, depth }) => {
+    try {
+      return ok(await runInvestigate({ prompt, count, dir, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS, depth: depth ?? 1 }));
+    } catch (e) {
+      return err(String(e.message ?? e));
+    }
+  }
+);
+
+server.tool(
+  "opencode_goal",
+  `Work toward a \`goal\` across N (default 3, max ${MAX_PARTICIPANTS}) SEQUENTIAL passes — never parallel, since these agents actually edit code and running them concurrently in the same working tree would corrupt each other's changes. (An earlier version of this tool ran independent parallel attempts judged by a panel — reverted after real testing showed the judge panel, being the same weak model, rejecting genuinely correct candidates more often than it should have.) Pass 1 attempts the goal fresh; each later pass continues the PREVIOUS pass's own opencode session (iterative refinement, told not to repeat finished work).\n\nAfter EVERY pass, real \`lint\`/\`test\` commands run against \`dir\` (mechanical ground truth, not another LLM opinion) and their actual pass/fail output is attached to the NEXT pass's prompt — this is the main defense against a weak model trusting its own "done!" self-report. Commands default to \`npm run lint\`/\`npm test\` when \`dir\`'s package.json declares those scripts; pass \`lintCommand\`/\`testCommand\` to override, or explicit \`null\` to force-disable one. These passes are NOT read-only (that's the point). Once every pass has finished, one final read-only "mcp-readonly" pass inspects the repo's actual current state itself (not just self-reports) and returns ONE consolidated verification report: was the goal actually met, what changed, any concerns/regressions, anything left undone, and whether lint/tests pass now.`,
+  {
+    goal: z.string().describe("The task/goal to work toward."),
+    passes: z.number().int().min(1).max(MAX_PARTICIPANTS).optional().describe("Number of sequential passes. Default 3."),
+    lintCommand: z.string().nullable().optional().describe("Shell command to run after every pass (e.g. \"npm run lint\"). Omit to auto-detect from `dir`'s package.json `scripts.lint`; pass explicit `null` to force-disable."),
+    testCommand: z.string().nullable().optional().describe("Shell command to run after every pass (e.g. \"npm test\"). Omit to auto-detect from `dir`'s package.json `scripts.test`; pass explicit `null` to force-disable."),
+    checkTimeoutMs: z.number().int().min(1000).optional().describe("Timeout for each lint/test command. Default 180000 (3 min)."),
+    dir: z.string().optional().describe("Absolute path of the project directory. Defaults to this server's cwd."),
+    agent: z.string().optional().describe("Named opencode agent every working pass should run as (NOT the verifier, which always uses mcp-readonly)."),
+    tier: z.enum(TIER_NAMES).optional().describe(`Tier for every pass AND the verifier. Default "${DEFAULT_TIER}". Ignored if \`model\` is set or a pin is active.`),
+    model: z.string().optional().describe('Explicit "provider/model" override for every pass and the verifier.'),
+    variant: z.string().optional().describe("Reasoning-effort variant to pair with an explicit model."),
+    waitMs: z.number().int().min(1000).max(540000).optional().describe(`Per-job wait cap. Default ${ORCHESTRATION_WAIT_MS}.`),
+  },
+  async ({ goal, passes, lintCommand, testCommand, checkTimeoutMs, dir, agent, tier, model, variant, waitMs }) => {
+    try {
+      return ok(await runGoal({ goal, passes, lintCommand, testCommand, checkTimeoutMs, dir, agent, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS }));
+    } catch (e) {
+      return err(String(e.message ?? e));
+    }
+  }
+);
+
+server.tool(
+  "opencode_job",
+  `Runs opencode_goal (sequential passes, default 3, with real lint/test output fed to each next pass) to achieve a goal, then immediately runs opencode_audit (confidence-ranked adversarial QA review) on whatever uncommitted changes resulted. The goal passes leave edits uncommitted in \`dir\`; audit reads \`git diff HEAD\` in that same dir and reviews them. Returns BOTH results — the goal's pass reports + verification, and the audit's confidence-ranked findings — verbatim, without interpreting anything or deciding what's serious. It is the CALLER (the orchestrator) that reads the QA findings and decides whether to send another goal round to address them, stop here, or something else.\n\nDefault \`qaCount\` is 8 (wider — up to 16 — when the free local pinned model is active; stays at this default otherwise, smaller than opencode_audit's own default of 16 — this is a fast complexity-appropriate check right after a goal run, not an exhaustive audit). Default \`qaDepth\` is 1. Pass \`model\`, \`variant\`, \`tier\`, \`waitMs\`, or \`agent\` to forward them to both sub-steps.`,
+  {
+    goal: z.string().describe("The task/goal to work toward."),
+    passes: z.number().int().min(1).max(MAX_PARTICIPANTS).optional().describe("Sequential passes for the goal step. Default 3."),
+    lintCommand: z.string().nullable().optional().describe("Shell command to run after every goal pass. Omit to auto-detect from `dir`'s package.json `scripts.lint`; pass explicit `null` to force-disable."),
+    testCommand: z.string().nullable().optional().describe("Shell command to run after every goal pass. Omit to auto-detect from `dir`'s package.json `scripts.test`; pass explicit `null` to force-disable."),
+    checkTimeoutMs: z.number().int().min(1000).optional().describe("Timeout for each lint/test command. Default 180000 (3 min)."),
+    qaCount: z.number().int().min(1).max(MAX_PARTICIPANTS).optional().describe("Number of QA reviewers. Default 8 (wider — up to 16 — when the free local pinned model is active; stays at this default otherwise)."),
+    qaDepth: z.number().int().min(0).max(3).optional().describe("Adversarial-round-then-reaggregate depth for the QA step (default 1). 0 skips adversarial verification."),
+    dir: z.string().optional().describe("Absolute path of the project directory. Defaults to this server's cwd."),
+    agent: z.string().optional().describe("Named opencode agent every working pass should run as (NOT the QA verifier)."),
+    tier: z.enum(TIER_NAMES).optional().describe(`Tier for every pass AND every QA participant/aggregator. Default "${DEFAULT_TIER}". Ignored if \`model\` is set or a pin is active.`),
+    model: z.string().optional().describe('Explicit "provider/model" override for every pass and QA job.'),
+    variant: z.string().optional().describe("Reasoning-effort variant to pair with an explicit model."),
+    waitMs: z.number().int().min(1000).max(540000).optional().describe(`Per-job wait cap. Default ${ORCHESTRATION_WAIT_MS}.`),
+  },
+  async ({ goal, passes, lintCommand, testCommand, checkTimeoutMs, qaCount, qaDepth, dir, agent, tier, model, variant, waitMs }) => {
+    try {
+      return ok(await runJob({ goal, passes, lintCommand, testCommand, checkTimeoutMs, qaCount, qaDepth, dir, agent, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS }));
+    } catch (e) {
+      return err(String(e.message ?? e));
+    }
   }
 );
 
