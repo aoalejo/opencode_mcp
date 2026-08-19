@@ -1,16 +1,16 @@
 {
   "tiers": {
     "low": {
-      "model": "opencode-go/glm-5.1",
-      "variant": null,
-      "label": "low — opencode-go/glm-5.1 (arena #29, score 1510, $1.4/$4.4 per M tokens)",
-      "arenaScore": 1510,
-      "arenaRank": 29,
+      "model": "opencode-go/deepseek-v4-flash",
+      "variant": "high",
+      "label": "low — opencode-go/deepseek-v4-flash (arena #11, score 1581, $0.22/$0.66 per M tokens)",
+      "arenaScore": 1581,
+      "arenaRank": 11,
       "cost": {
-        "input": 1.4,
-        "output": 4.4,
+        "input": 0.22,
+        "output": 0.66,
         "cache": {
-          "read": 0.26,
+          "read": 0.007,
           "write": 0
         }
       },
@@ -18,38 +18,38 @@
       "inheritedFrom": null
     },
     "mid": {
-      "model": "opencode-go/qwen3.8-max",
-      "variant": null,
-      "label": "mid — opencode-go/qwen3.8-max (arena #3, score 1667, $2/$6 per M tokens)",
-      "arenaScore": 1667,
-      "arenaRank": 3,
+      "model": "opencode-go/deepseek-v4-flash",
+      "variant": "high",
+      "label": "mid — opencode-go/deepseek-v4-flash (arena #11, score 1581, $0.22/$0.66 per M tokens)",
+      "arenaScore": 1581,
+      "arenaRank": 11,
       "cost": {
-        "input": 2,
-        "output": 6,
+        "input": 0.22,
+        "output": 0.66,
         "cache": {
-          "read": 0.25,
-          "write": 2.5
-        }
-      },
-      "inherited": false,
-      "inheritedFrom": null
-    },
-    "high": {
-      "model": "opencode-go/qwen3.8-max",
-      "variant": null,
-      "label": "high — opencode-go/qwen3.8-max (arena #3, score 1667, $2/$6 per M tokens)",
-      "arenaScore": 1667,
-      "arenaRank": 3,
-      "cost": {
-        "input": 2,
-        "output": 6,
-        "cache": {
-          "read": 0.25,
-          "write": 2.5
+          "read": 0.007,
+          "write": 0
         }
       },
       "inherited": true,
-      "inheritedFrom": "mid"
+      "inheritedFrom": "low"
+    },
+    "high": {
+      "model": "opencode-go/deepseek-v4-flash",
+      "variant": "high",
+      "label": "high — opencode-go/deepseek-v4-flash (arena #11, score 1581, $0.22/$0.66 per M tokens)",
+      "arenaScore": 1581,
+      "arenaRank": 11,
+      "cost": {
+        "input": 0.22,
+        "output": 0.66,
+        "cache": {
+          "read": 0.007,
+          "write": 0
+        }
+      },
+      "inherited": true,
+      "inheritedFrom": "low"
     },
     "max": {
       "model": "opencode-go/qwen3.8-max",
@@ -65,155 +65,381 @@
           "write": 2.5
         }
       },
-      "inherited": true,
-      "inheritedFrom": "mid"
+      "inherited": false,
+      "inheritedFrom": null
     }
   },
   "bands": {
     "low": [
       {
-        "model": "opencode-go/glm-5.1",
-        "variant": null,
+        "model": "opencode-go/deepseek-v4-flash",
+        "variant": "high",
         "cost": {
-          "input": 1.4,
-          "output": 4.4,
+          "input": 0.22,
+          "output": 0.66,
           "cache": {
-            "read": 0.26,
+            "read": 0.007,
             "write": 0
           }
         },
-        "contextWindow": 202752,
-        "arenaScore": 1510,
-        "arenaRank": 29,
-        "arenaSlug": "glm-5.1"
+        "contextWindow": 1000000,
+        "arenaScore": 1581,
+        "arenaRank": 11,
+        "arenaSlug": "deepseek-v4-flash-high"
+      },
+      {
+        "model": "opencode-go/hy3",
+        "variant": null,
+        "cost": {
+          "input": 0.14,
+          "output": 0.58,
+          "cache": {
+            "read": 0.035,
+            "write": 0
+          }
+        },
+        "contextWindow": 256000,
+        "arenaScore": 1522,
+        "arenaRank": 24,
+        "arenaSlug": "hy3"
+      },
+      {
+        "model": "opencode-go/gpt-5.6-luna",
+        "variant": "xhigh",
+        "cost": {
+          "input": 0.2,
+          "output": 1.2,
+          "cache": {
+            "read": 0.02,
+            "write": 0.25
+          },
+          "tiers": [
+            {
+              "input": 0.4,
+              "output": 1.8,
+              "cache": {
+                "read": 0.04,
+                "write": 0.5
+              },
+              "tier": {
+                "type": "context",
+                "size": 272000
+              }
+            }
+          ],
+          "experimentalOver200K": {
+            "cache": {
+              "read": 0.04,
+              "write": 0.5
+            },
+            "input": 0.4,
+            "output": 1.8
+          }
+        },
+        "contextWindow": 1050000,
+        "arenaScore": 1517,
+        "arenaRank": 28,
+        "arenaSlug": "gpt-5.6-luna-xhigh (codex-harness)"
+      },
+      {
+        "model": "opencode-go/mimo-v2.5",
+        "variant": null,
+        "cost": {
+          "input": 0.14,
+          "output": 0.28,
+          "cache": {
+            "read": 0.0028,
+            "write": 0
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1438,
+        "arenaRank": 50,
+        "arenaSlug": "mimo-v2.5"
       }
     ],
     "mid": [
       {
-        "model": "opencode-go/qwen3.8-max",
-        "variant": null,
+        "model": "opencode-go/deepseek-v4-flash",
+        "variant": "high",
         "cost": {
-          "input": 2,
-          "output": 6,
+          "input": 0.22,
+          "output": 0.66,
           "cache": {
-            "read": 0.25,
-            "write": 2.5
+            "read": 0.007,
+            "write": 0
           }
         },
         "contextWindow": 1000000,
-        "arenaScore": 1667,
-        "arenaRank": 3,
-        "arenaSlug": "qwen3.8-max"
+        "arenaScore": 1581,
+        "arenaRank": 11,
+        "arenaSlug": "deepseek-v4-flash-high"
       },
       {
-        "model": "opencode-go/grok-4.5",
+        "model": "opencode-go/hy3",
         "variant": null,
         "cost": {
-          "input": 2,
-          "output": 6,
+          "input": 0.14,
+          "output": 0.58,
           "cache": {
-            "read": 0.5,
+            "read": 0.035,
             "write": 0
+          }
+        },
+        "contextWindow": 256000,
+        "arenaScore": 1522,
+        "arenaRank": 24,
+        "arenaSlug": "hy3"
+      },
+      {
+        "model": "opencode-go/gpt-5.6-luna",
+        "variant": "xhigh",
+        "cost": {
+          "input": 0.2,
+          "output": 1.2,
+          "cache": {
+            "read": 0.02,
+            "write": 0.25
           },
           "tiers": [
             {
-              "input": 4,
-              "output": 12,
+              "input": 0.4,
+              "output": 1.8,
               "cache": {
-                "read": 1,
-                "write": 0
+                "read": 0.04,
+                "write": 0.5
               },
               "tier": {
                 "type": "context",
-                "size": 200000
+                "size": 272000
               }
             }
           ],
           "experimentalOver200K": {
             "cache": {
-              "read": 1,
-              "write": 0
+              "read": 0.04,
+              "write": 0.5
             },
-            "input": 4,
-            "output": 12
+            "input": 0.4,
+            "output": 1.8
           }
         },
-        "contextWindow": 500000,
-        "arenaScore": 1555,
-        "arenaRank": 15,
-        "arenaSlug": "grok-4.5"
+        "contextWindow": 1050000,
+        "arenaScore": 1517,
+        "arenaRank": 28,
+        "arenaSlug": "gpt-5.6-luna-xhigh (codex-harness)"
       },
       {
-        "model": "opencode-go/glm-5.1",
+        "model": "opencode-go/minimax-m3",
         "variant": null,
         "cost": {
-          "input": 1.4,
-          "output": 4.4,
+          "input": 0.3,
+          "output": 1.2,
           "cache": {
-            "read": 0.26,
+            "read": 0.06,
+            "write": 0
+          },
+          "tiers": [
+            {
+              "input": 0.6,
+              "output": 2.4,
+              "cache": {
+                "read": 0.12,
+                "write": 0
+              },
+              "tier": {
+                "type": "context",
+                "size": 512000
+              }
+            }
+          ],
+          "experimentalOver200K": {
+            "cache": {
+              "read": 0.12,
+              "write": 0
+            },
+            "input": 0.6,
+            "output": 2.4
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1490,
+        "arenaRank": 34,
+        "arenaSlug": "minimax-m3"
+      },
+      {
+        "model": "opencode-go/mimo-v2.5-pro",
+        "variant": null,
+        "cost": {
+          "input": 0.435,
+          "output": 0.87,
+          "cache": {
+            "read": 0.003625,
             "write": 0
           }
         },
-        "contextWindow": 202752,
-        "arenaScore": 1510,
-        "arenaRank": 29,
-        "arenaSlug": "glm-5.1"
+        "contextWindow": 1048576,
+        "arenaScore": 1474,
+        "arenaRank": 38,
+        "arenaSlug": "mimo-v2.5-pro"
+      },
+      {
+        "model": "opencode-go/qwen3.6-plus",
+        "variant": null,
+        "cost": {
+          "input": 0.5,
+          "output": 3,
+          "cache": {
+            "read": 0.05,
+            "write": 0.625
+          },
+          "tiers": [
+            {
+              "input": 2,
+              "output": 6,
+              "cache": {
+                "read": 0.2,
+                "write": 2.5
+              },
+              "tier": {
+                "type": "context",
+                "size": 256000
+              }
+            }
+          ],
+          "experimentalOver200K": {
+            "cache": {
+              "read": 0.2,
+              "write": 2.5
+            },
+            "input": 2,
+            "output": 6
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1460,
+        "arenaRank": 43,
+        "arenaSlug": "qwen3.6-plus"
+      },
+      {
+        "model": "opencode-go/mimo-v2.5",
+        "variant": null,
+        "cost": {
+          "input": 0.14,
+          "output": 0.28,
+          "cache": {
+            "read": 0.0028,
+            "write": 0
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1438,
+        "arenaRank": 50,
+        "arenaSlug": "mimo-v2.5"
+      },
+      {
+        "model": "opencode-go/minimax-m2.7",
+        "variant": null,
+        "cost": {
+          "input": 0.3,
+          "output": 1.2,
+          "cache": {
+            "read": 0.06,
+            "write": 0
+          }
+        },
+        "contextWindow": 204800,
+        "arenaScore": 1397,
+        "arenaRank": 65,
+        "arenaSlug": "minimax-m2.7"
       }
     ],
     "high": [
       {
-        "model": "opencode-go/qwen3.8-max",
-        "variant": null,
+        "model": "opencode-go/deepseek-v4-flash",
+        "variant": "high",
         "cost": {
-          "input": 2,
-          "output": 6,
+          "input": 0.22,
+          "output": 0.66,
           "cache": {
-            "read": 0.25,
-            "write": 2.5
+            "read": 0.007,
+            "write": 0
           }
         },
         "contextWindow": 1000000,
-        "arenaScore": 1667,
-        "arenaRank": 3,
-        "arenaSlug": "qwen3.8-max"
+        "arenaScore": 1581,
+        "arenaRank": 11,
+        "arenaSlug": "deepseek-v4-flash-high"
       },
       {
-        "model": "opencode-go/grok-4.5",
+        "model": "opencode-go/glm-5.2",
+        "variant": "max",
+        "cost": {
+          "input": 1.4,
+          "output": 4.4,
+          "cache": {
+            "read": 0.26,
+            "write": 0
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1585,
+        "arenaRank": 9,
+        "arenaSlug": "glm-5.2-max"
+      },
+      {
+        "model": "opencode-go/hy3",
         "variant": null,
         "cost": {
-          "input": 2,
-          "output": 6,
+          "input": 0.14,
+          "output": 0.58,
           "cache": {
-            "read": 0.5,
+            "read": 0.035,
             "write": 0
+          }
+        },
+        "contextWindow": 256000,
+        "arenaScore": 1522,
+        "arenaRank": 24,
+        "arenaSlug": "hy3"
+      },
+      {
+        "model": "opencode-go/gpt-5.6-luna",
+        "variant": "xhigh",
+        "cost": {
+          "input": 0.2,
+          "output": 1.2,
+          "cache": {
+            "read": 0.02,
+            "write": 0.25
           },
           "tiers": [
             {
-              "input": 4,
-              "output": 12,
+              "input": 0.4,
+              "output": 1.8,
               "cache": {
-                "read": 1,
-                "write": 0
+                "read": 0.04,
+                "write": 0.5
               },
               "tier": {
                 "type": "context",
-                "size": 200000
+                "size": 272000
               }
             }
           ],
           "experimentalOver200K": {
             "cache": {
-              "read": 1,
-              "write": 0
+              "read": 0.04,
+              "write": 0.5
             },
-            "input": 4,
-            "output": 12
+            "input": 0.4,
+            "output": 1.8
           }
         },
-        "contextWindow": 500000,
-        "arenaScore": 1555,
-        "arenaRank": 15,
-        "arenaSlug": "grok-4.5"
+        "contextWindow": 1050000,
+        "arenaScore": 1517,
+        "arenaRank": 28,
+        "arenaSlug": "gpt-5.6-luna-xhigh (codex-harness)"
       },
       {
         "model": "opencode-go/glm-5.1",
@@ -230,6 +456,178 @@
         "arenaScore": 1510,
         "arenaRank": 29,
         "arenaSlug": "glm-5.1"
+      },
+      {
+        "model": "opencode-go/kimi-k2.6",
+        "variant": null,
+        "cost": {
+          "input": 0.95,
+          "output": 4,
+          "cache": {
+            "read": 0.16,
+            "write": 0
+          }
+        },
+        "contextWindow": 262144,
+        "arenaScore": 1509,
+        "arenaRank": 30,
+        "arenaSlug": "kimi-k2.6"
+      },
+      {
+        "model": "opencode-go/minimax-m3",
+        "variant": null,
+        "cost": {
+          "input": 0.3,
+          "output": 1.2,
+          "cache": {
+            "read": 0.06,
+            "write": 0
+          },
+          "tiers": [
+            {
+              "input": 0.6,
+              "output": 2.4,
+              "cache": {
+                "read": 0.12,
+                "write": 0
+              },
+              "tier": {
+                "type": "context",
+                "size": 512000
+              }
+            }
+          ],
+          "experimentalOver200K": {
+            "cache": {
+              "read": 0.12,
+              "write": 0
+            },
+            "input": 0.6,
+            "output": 2.4
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1490,
+        "arenaRank": 34,
+        "arenaSlug": "minimax-m3"
+      },
+      {
+        "model": "opencode-go/mimo-v2.5-pro",
+        "variant": null,
+        "cost": {
+          "input": 0.435,
+          "output": 0.87,
+          "cache": {
+            "read": 0.003625,
+            "write": 0
+          }
+        },
+        "contextWindow": 1048576,
+        "arenaScore": 1474,
+        "arenaRank": 38,
+        "arenaSlug": "mimo-v2.5-pro"
+      },
+      {
+        "model": "opencode-go/kimi-k2.7-code",
+        "variant": null,
+        "cost": {
+          "input": 0.95,
+          "output": 4,
+          "cache": {
+            "read": 0.19,
+            "write": 0
+          }
+        },
+        "contextWindow": 262144,
+        "arenaScore": 1473,
+        "arenaRank": 39,
+        "arenaSlug": "kimi-k2.7-code"
+      },
+      {
+        "model": "opencode-go/qwen3.6-plus",
+        "variant": null,
+        "cost": {
+          "input": 0.5,
+          "output": 3,
+          "cache": {
+            "read": 0.05,
+            "write": 0.625
+          },
+          "tiers": [
+            {
+              "input": 2,
+              "output": 6,
+              "cache": {
+                "read": 0.2,
+                "write": 2.5
+              },
+              "tier": {
+                "type": "context",
+                "size": 256000
+              }
+            }
+          ],
+          "experimentalOver200K": {
+            "cache": {
+              "read": 0.2,
+              "write": 2.5
+            },
+            "input": 2,
+            "output": 6
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1460,
+        "arenaRank": 43,
+        "arenaSlug": "qwen3.6-plus"
+      },
+      {
+        "model": "opencode-go/deepseek-v4-pro",
+        "variant": null,
+        "cost": {
+          "input": 0.66,
+          "output": 1.98,
+          "cache": {
+            "read": 0.022,
+            "write": 0
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1446,
+        "arenaRank": 47,
+        "arenaSlug": "deepseek-v4-pro"
+      },
+      {
+        "model": "opencode-go/mimo-v2.5",
+        "variant": null,
+        "cost": {
+          "input": 0.14,
+          "output": 0.28,
+          "cache": {
+            "read": 0.0028,
+            "write": 0
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1438,
+        "arenaRank": 50,
+        "arenaSlug": "mimo-v2.5"
+      },
+      {
+        "model": "opencode-go/minimax-m2.7",
+        "variant": null,
+        "cost": {
+          "input": 0.3,
+          "output": 1.2,
+          "cache": {
+            "read": 0.06,
+            "write": 0
+          }
+        },
+        "contextWindow": 204800,
+        "arenaScore": 1397,
+        "arenaRank": 65,
+        "arenaSlug": "minimax-m2.7"
       }
     ],
     "max": [
@@ -266,6 +664,38 @@
         "arenaSlug": "kimi-k3-max"
       },
       {
+        "model": "opencode-go/glm-5.2",
+        "variant": "max",
+        "cost": {
+          "input": 1.4,
+          "output": 4.4,
+          "cache": {
+            "read": 0.26,
+            "write": 0
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1585,
+        "arenaRank": 9,
+        "arenaSlug": "glm-5.2-max"
+      },
+      {
+        "model": "opencode-go/deepseek-v4-flash",
+        "variant": "high",
+        "cost": {
+          "input": 0.22,
+          "output": 0.66,
+          "cache": {
+            "read": 0.007,
+            "write": 0
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1581,
+        "arenaRank": 11,
+        "arenaSlug": "deepseek-v4-flash-high"
+      },
+      {
         "model": "opencode-go/grok-4.5",
         "variant": null,
         "cost": {
@@ -304,6 +734,60 @@
         "arenaSlug": "grok-4.5"
       },
       {
+        "model": "opencode-go/hy3",
+        "variant": null,
+        "cost": {
+          "input": 0.14,
+          "output": 0.58,
+          "cache": {
+            "read": 0.035,
+            "write": 0
+          }
+        },
+        "contextWindow": 256000,
+        "arenaScore": 1522,
+        "arenaRank": 24,
+        "arenaSlug": "hy3"
+      },
+      {
+        "model": "opencode-go/gpt-5.6-luna",
+        "variant": "xhigh",
+        "cost": {
+          "input": 0.2,
+          "output": 1.2,
+          "cache": {
+            "read": 0.02,
+            "write": 0.25
+          },
+          "tiers": [
+            {
+              "input": 0.4,
+              "output": 1.8,
+              "cache": {
+                "read": 0.04,
+                "write": 0.5
+              },
+              "tier": {
+                "type": "context",
+                "size": 272000
+              }
+            }
+          ],
+          "experimentalOver200K": {
+            "cache": {
+              "read": 0.04,
+              "write": 0.5
+            },
+            "input": 0.4,
+            "output": 1.8
+          }
+        },
+        "contextWindow": 1050000,
+        "arenaScore": 1517,
+        "arenaRank": 28,
+        "arenaSlug": "gpt-5.6-luna-xhigh (codex-harness)"
+      },
+      {
         "model": "opencode-go/glm-5.1",
         "variant": null,
         "cost": {
@@ -318,10 +802,424 @@
         "arenaScore": 1510,
         "arenaRank": 29,
         "arenaSlug": "glm-5.1"
+      },
+      {
+        "model": "opencode-go/kimi-k2.6",
+        "variant": null,
+        "cost": {
+          "input": 0.95,
+          "output": 4,
+          "cache": {
+            "read": 0.16,
+            "write": 0
+          }
+        },
+        "contextWindow": 262144,
+        "arenaScore": 1509,
+        "arenaRank": 30,
+        "arenaSlug": "kimi-k2.6"
+      },
+      {
+        "model": "opencode-go/minimax-m3",
+        "variant": null,
+        "cost": {
+          "input": 0.3,
+          "output": 1.2,
+          "cache": {
+            "read": 0.06,
+            "write": 0
+          },
+          "tiers": [
+            {
+              "input": 0.6,
+              "output": 2.4,
+              "cache": {
+                "read": 0.12,
+                "write": 0
+              },
+              "tier": {
+                "type": "context",
+                "size": 512000
+              }
+            }
+          ],
+          "experimentalOver200K": {
+            "cache": {
+              "read": 0.12,
+              "write": 0
+            },
+            "input": 0.6,
+            "output": 2.4
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1490,
+        "arenaRank": 34,
+        "arenaSlug": "minimax-m3"
+      },
+      {
+        "model": "opencode-go/mimo-v2.5-pro",
+        "variant": null,
+        "cost": {
+          "input": 0.435,
+          "output": 0.87,
+          "cache": {
+            "read": 0.003625,
+            "write": 0
+          }
+        },
+        "contextWindow": 1048576,
+        "arenaScore": 1474,
+        "arenaRank": 38,
+        "arenaSlug": "mimo-v2.5-pro"
+      },
+      {
+        "model": "opencode-go/kimi-k2.7-code",
+        "variant": null,
+        "cost": {
+          "input": 0.95,
+          "output": 4,
+          "cache": {
+            "read": 0.19,
+            "write": 0
+          }
+        },
+        "contextWindow": 262144,
+        "arenaScore": 1473,
+        "arenaRank": 39,
+        "arenaSlug": "kimi-k2.7-code"
+      },
+      {
+        "model": "opencode-go/qwen3.6-plus",
+        "variant": null,
+        "cost": {
+          "input": 0.5,
+          "output": 3,
+          "cache": {
+            "read": 0.05,
+            "write": 0.625
+          },
+          "tiers": [
+            {
+              "input": 2,
+              "output": 6,
+              "cache": {
+                "read": 0.2,
+                "write": 2.5
+              },
+              "tier": {
+                "type": "context",
+                "size": 256000
+              }
+            }
+          ],
+          "experimentalOver200K": {
+            "cache": {
+              "read": 0.2,
+              "write": 2.5
+            },
+            "input": 2,
+            "output": 6
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1460,
+        "arenaRank": 43,
+        "arenaSlug": "qwen3.6-plus"
+      },
+      {
+        "model": "opencode-go/deepseek-v4-pro",
+        "variant": null,
+        "cost": {
+          "input": 0.66,
+          "output": 1.98,
+          "cache": {
+            "read": 0.022,
+            "write": 0
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1446,
+        "arenaRank": 47,
+        "arenaSlug": "deepseek-v4-pro"
+      },
+      {
+        "model": "opencode-go/mimo-v2.5",
+        "variant": null,
+        "cost": {
+          "input": 0.14,
+          "output": 0.28,
+          "cache": {
+            "read": 0.0028,
+            "write": 0
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1438,
+        "arenaRank": 50,
+        "arenaSlug": "mimo-v2.5"
+      },
+      {
+        "model": "opencode-go/minimax-m2.7",
+        "variant": null,
+        "cost": {
+          "input": 0.3,
+          "output": 1.2,
+          "cache": {
+            "read": 0.06,
+            "write": 0
+          }
+        },
+        "contextWindow": 204800,
+        "arenaScore": 1397,
+        "arenaRank": 65,
+        "arenaSlug": "minimax-m2.7"
       }
     ]
   },
   "candidates": [
+    {
+      "model": "opencode-go/hy3",
+      "variant": null,
+      "cost": {
+        "input": 0.14,
+        "output": 0.58,
+        "cache": {
+          "read": 0.035,
+          "write": 0
+        }
+      },
+      "contextWindow": 256000,
+      "arenaScore": 1522,
+      "arenaRank": 24,
+      "arenaSlug": "hy3"
+    },
+    {
+      "model": "opencode-go/mimo-v2.5",
+      "variant": null,
+      "cost": {
+        "input": 0.14,
+        "output": 0.28,
+        "cache": {
+          "read": 0.0028,
+          "write": 0
+        }
+      },
+      "contextWindow": 1000000,
+      "arenaScore": 1438,
+      "arenaRank": 50,
+      "arenaSlug": "mimo-v2.5"
+    },
+    {
+      "model": "opencode-go/gpt-5.6-luna",
+      "variant": "xhigh",
+      "cost": {
+        "input": 0.2,
+        "output": 1.2,
+        "cache": {
+          "read": 0.02,
+          "write": 0.25
+        },
+        "tiers": [
+          {
+            "input": 0.4,
+            "output": 1.8,
+            "cache": {
+              "read": 0.04,
+              "write": 0.5
+            },
+            "tier": {
+              "type": "context",
+              "size": 272000
+            }
+          }
+        ],
+        "experimentalOver200K": {
+          "cache": {
+            "read": 0.04,
+            "write": 0.5
+          },
+          "input": 0.4,
+          "output": 1.8
+        }
+      },
+      "contextWindow": 1050000,
+      "arenaScore": 1517,
+      "arenaRank": 28,
+      "arenaSlug": "gpt-5.6-luna-xhigh (codex-harness)"
+    },
+    {
+      "model": "opencode-go/deepseek-v4-flash",
+      "variant": "high",
+      "cost": {
+        "input": 0.22,
+        "output": 0.66,
+        "cache": {
+          "read": 0.007,
+          "write": 0
+        }
+      },
+      "contextWindow": 1000000,
+      "arenaScore": 1581,
+      "arenaRank": 11,
+      "arenaSlug": "deepseek-v4-flash-high"
+    },
+    {
+      "model": "opencode-go/minimax-m2.7",
+      "variant": null,
+      "cost": {
+        "input": 0.3,
+        "output": 1.2,
+        "cache": {
+          "read": 0.06,
+          "write": 0
+        }
+      },
+      "contextWindow": 204800,
+      "arenaScore": 1397,
+      "arenaRank": 65,
+      "arenaSlug": "minimax-m2.7"
+    },
+    {
+      "model": "opencode-go/minimax-m3",
+      "variant": null,
+      "cost": {
+        "input": 0.3,
+        "output": 1.2,
+        "cache": {
+          "read": 0.06,
+          "write": 0
+        },
+        "tiers": [
+          {
+            "input": 0.6,
+            "output": 2.4,
+            "cache": {
+              "read": 0.12,
+              "write": 0
+            },
+            "tier": {
+              "type": "context",
+              "size": 512000
+            }
+          }
+        ],
+        "experimentalOver200K": {
+          "cache": {
+            "read": 0.12,
+            "write": 0
+          },
+          "input": 0.6,
+          "output": 2.4
+        }
+      },
+      "contextWindow": 1000000,
+      "arenaScore": 1490,
+      "arenaRank": 34,
+      "arenaSlug": "minimax-m3"
+    },
+    {
+      "model": "opencode-go/mimo-v2.5-pro",
+      "variant": null,
+      "cost": {
+        "input": 0.435,
+        "output": 0.87,
+        "cache": {
+          "read": 0.003625,
+          "write": 0
+        }
+      },
+      "contextWindow": 1048576,
+      "arenaScore": 1474,
+      "arenaRank": 38,
+      "arenaSlug": "mimo-v2.5-pro"
+    },
+    {
+      "model": "opencode-go/qwen3.6-plus",
+      "variant": null,
+      "cost": {
+        "input": 0.5,
+        "output": 3,
+        "cache": {
+          "read": 0.05,
+          "write": 0.625
+        },
+        "tiers": [
+          {
+            "input": 2,
+            "output": 6,
+            "cache": {
+              "read": 0.2,
+              "write": 2.5
+            },
+            "tier": {
+              "type": "context",
+              "size": 256000
+            }
+          }
+        ],
+        "experimentalOver200K": {
+          "cache": {
+            "read": 0.2,
+            "write": 2.5
+          },
+          "input": 2,
+          "output": 6
+        }
+      },
+      "contextWindow": 1000000,
+      "arenaScore": 1460,
+      "arenaRank": 43,
+      "arenaSlug": "qwen3.6-plus"
+    },
+    {
+      "model": "opencode-go/deepseek-v4-pro",
+      "variant": null,
+      "cost": {
+        "input": 0.66,
+        "output": 1.98,
+        "cache": {
+          "read": 0.022,
+          "write": 0
+        }
+      },
+      "contextWindow": 1000000,
+      "arenaScore": 1446,
+      "arenaRank": 47,
+      "arenaSlug": "deepseek-v4-pro"
+    },
+    {
+      "model": "opencode-go/kimi-k2.6",
+      "variant": null,
+      "cost": {
+        "input": 0.95,
+        "output": 4,
+        "cache": {
+          "read": 0.16,
+          "write": 0
+        }
+      },
+      "contextWindow": 262144,
+      "arenaScore": 1509,
+      "arenaRank": 30,
+      "arenaSlug": "kimi-k2.6"
+    },
+    {
+      "model": "opencode-go/kimi-k2.7-code",
+      "variant": null,
+      "cost": {
+        "input": 0.95,
+        "output": 4,
+        "cache": {
+          "read": 0.19,
+          "write": 0
+        }
+      },
+      "contextWindow": 262144,
+      "arenaScore": 1473,
+      "arenaRank": 39,
+      "arenaSlug": "kimi-k2.7-code"
+    },
     {
       "model": "opencode-go/glm-5.1",
       "variant": null,
@@ -337,6 +1235,22 @@
       "arenaScore": 1510,
       "arenaRank": 29,
       "arenaSlug": "glm-5.1"
+    },
+    {
+      "model": "opencode-go/glm-5.2",
+      "variant": "max",
+      "cost": {
+        "input": 1.4,
+        "output": 4.4,
+        "cache": {
+          "read": 0.26,
+          "write": 0
+        }
+      },
+      "contextWindow": 1000000,
+      "arenaScore": 1585,
+      "arenaRank": 9,
+      "arenaSlug": "glm-5.2-max"
     },
     {
       "model": "opencode-go/grok-4.5",
@@ -411,22 +1325,10 @@
   ],
   "unmatched": [
     "opencode-go/glm-5.3",
+    "opencode-go/muse-spark-1.2-contributor",
     "opencode-go/qwen3.7-max",
     "opencode-go/qwen3.7-plus"
   ],
-  "blocked": [
-    "opencode-go/deepseek-v4-flash",
-    "opencode-go/deepseek-v4-pro",
-    "opencode-go/glm-5.2",
-    "opencode-go/gpt-5.6-luna",
-    "opencode-go/hy3",
-    "opencode-go/kimi-k2.6",
-    "opencode-go/kimi-k2.7-code",
-    "opencode-go/mimo-v2.5",
-    "opencode-go/mimo-v2.5-pro",
-    "opencode-go/minimax-m2.7",
-    "opencode-go/minimax-m3",
-    "opencode-go/qwen3.6-plus"
-  ],
-  "computedAt": 1787038759135
+  "blocked": [],
+  "computedAt": 1787144058018
 }

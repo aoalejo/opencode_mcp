@@ -133,11 +133,42 @@ function formatChecksForPrompt(checks) {
 }
 
 /**
+ * Strip a raw jobSummary down to what's actually worth handing back to the
+ * MCP caller. `prompt` is dropped UNCONDITIONALLY — it's whatever this
+ * function built for the job (often the full diff or the full running
+ * report), already known to the caller or redundant with the reconciled
+ * result, and multiplying it across N participants is pure bloat (observed
+ * 2026-08-19: a 16-participant audit's `participants[].prompt` alone was
+ * 650KB of a 773KB response, next to a 5KB actual answer). `dir`/`sessionId`/
+ * `agent`/`exitCode`/`stderrTail`/`startedAt`/`finishedAt` are internal
+ * bookkeeping the caller has no use for here either. `text` (the participant's
+ * own findings) is kept only when `keepText` is true — default responses
+ * return just the reconciled report; pass `verbose: true` on the tool to see
+ * each individual participant/pass's raw output for debugging.
+ */
+function trimJob(summary, { keepText = false } = {}) {
+  const trimmed = {
+    jobId: summary.jobId,
+    status: summary.status,
+    model: summary.model,
+    variant: summary.variant,
+    tokens: summary.tokens,
+    cost: summary.cost,
+    errorMessage: summary.errorMessage,
+    durationMs: summary.durationMs,
+  };
+  if (keepText) trimmed.text = summary.text;
+  return trimmed;
+}
+
+/**
  * Fan `count` jobs out IN PARALLEL (all started before any waitForJob), all
  * pinned to the same resolved model+variant and forced onto READONLY_AGENT so
  * "solo lectura forzado" is an actual permission-engine guarantee, not a
- * prompt request a model could ignore. Returns each participant's summary
- * (findings text, status, cost) once every one of them has finished.
+ * prompt request a model could ignore. Returns each participant's FULL
+ * summary (including `text`/`prompt`) — this is the internal shape used to
+ * build reconciliation prompts; callers returning this to the MCP layer must
+ * trim it first via `trimJob`.
  */
 async function runReadOnlyBatch({ count, buildPrompt, dir, model, variant, tier, waitMs, titlePrefix }) {
   const resolved = resolveModel({ model, variant, tier });
@@ -284,7 +315,7 @@ async function reconcileRecursive({ participants, context, depth, count, dir, mo
  * Confidence-ranked, adversarially-verified reconciliation (see
  * reconcileRecursive) replaces a single naive synthesis pass.
  */
-export async function runAudit({ count, dir, model, variant, tier, waitMs, focus, depth = 1, baseCommit }) {
+export async function runAudit({ count, dir, model, variant, tier, waitMs, focus, depth = 1, baseCommit, verbose = false }) {
   const n = clampCount(count, defaultWidth({ model, tier }, 24, 16));
   const { diff, status, files, mode, base } = getDiff({ dir, baseCommit });
   if (!diff.trim() && !status.trim()) {
@@ -325,8 +356,9 @@ export async function runAudit({ count, dir, model, variant, tier, waitMs, focus
     : `${n} independent read-only reviewers audited the same diff (${mode === "commit" ? `commit ${base} through HEAD` : "uncommitted changes"}) from different lenses.\n\n\`git diff\`:\n${diff}`;
 
   const reconciliation = await reconcileRecursive({ participants, context, depth, count: n, dir, model, variant, tier, waitMs });
+  const participantsForReturn = participants.map((p) => ({ index: p.index, lens: p.lens, ...trimJob(p, { keepText: verbose }) }));
 
-  return { participantCount: n, participants, reconciliation, diffStat: status, mode, baseCommit: base, filesReviewed: files, perFileMode };
+  return { participantCount: n, participants: participantsForReturn, reconciliation, diffStat: status, mode, baseCommit: base, filesReviewed: files, perFileMode };
 }
 
 /**
@@ -336,7 +368,7 @@ export async function runAudit({ count, dir, model, variant, tier, waitMs, focus
  * deterministic model would otherwise just duplicate each other) instead of
  * a fixed lens list, since the question itself is open-ended.
  */
-export async function runInvestigate({ prompt, count, dir, model, variant, tier, waitMs, depth = 1 }) {
+export async function runInvestigate({ prompt, count, dir, model, variant, tier, waitMs, depth = 1, verbose = false }) {
   const n = clampCount(count, defaultWidth({ model, tier }, 16, 5));
   const buildPrompt = (i, total) =>
     `${prompt}\n\n---\nYou are investigator #${i + 1} of ${total} looking into this independently. ` +
@@ -358,8 +390,9 @@ export async function runInvestigate({ prompt, count, dir, model, variant, tier,
   const context = `${n} independent read-only investigators looked into the question: "${prompt}"`;
 
   const reconciliation = await reconcileRecursive({ participants, context, depth, count: n, dir, model, variant, tier, waitMs });
+  const participantsForReturn = participants.map((p) => ({ index: p.index, ...trimJob(p, { keepText: verbose }) }));
 
-  return { prompt, participantCount: n, participants, reconciliation };
+  return { prompt, participantCount: n, participants: participantsForReturn, reconciliation };
 }
 
 /**
@@ -382,7 +415,7 @@ export async function runInvestigate({ prompt, count, dir, model, variant, tier,
  * Only the final verifier is read-only — the working passes are not, that's
  * the whole point of "resolver la tarea".
  */
-export async function runGoal({ goal, dir, passes, lintCommand, testCommand, checkTimeoutMs, model, variant, tier, waitMs, agent }) {
+export async function runGoal({ goal, dir, passes, lintCommand, testCommand, checkTimeoutMs, model, variant, tier, waitMs, agent, verbose = false }) {
   const n = clampCount(passes, 3);
   const resolved = resolveModel({ model, variant, tier });
   const detected = detectChecks(dir);
@@ -451,7 +484,16 @@ export async function runGoal({ goal, dir, passes, lintCommand, testCommand, che
     title: "mcp-goal-verify",
   });
 
-  return { goal, passCount: n, passes: results, sessionId, checksUsed: { lintCommand: effectiveLint, testCommand: effectiveTest }, verification };
+  const passesForReturn = results.map((r) => ({ pass: r.pass, ...trimJob(r, { keepText: verbose }), checks: r.checks }));
+
+  return {
+    goal,
+    passCount: n,
+    passes: passesForReturn,
+    sessionId,
+    checksUsed: { lintCommand: effectiveLint, testCommand: effectiveTest },
+    verification: trimJob(verification, { keepText: true }),
+  };
 }
 
 /**
@@ -462,9 +504,9 @@ export async function runGoal({ goal, dir, passes, lintCommand, testCommand, che
  * decide what (if anything) to do with the QA findings (fix them, ignore
  * them, ask the user).
  */
-export async function runJob({ goal, dir, passes, lintCommand, testCommand, checkTimeoutMs, qaCount, qaDepth = 1, model, variant, tier, waitMs, agent }) {
+export async function runJob({ goal, dir, passes, lintCommand, testCommand, checkTimeoutMs, qaCount, qaDepth = 1, model, variant, tier, waitMs, agent, verbose = false }) {
   const effectiveQaCount = qaCount ?? defaultWidth({ model, tier }, 16, 8);
-  const goalResult = await runGoal({ goal, passes, lintCommand, testCommand, checkTimeoutMs, dir, model, variant, tier, waitMs, agent });
-  const qa = await runAudit({ count: effectiveQaCount, depth: qaDepth, dir, model, variant, tier, waitMs });
+  const goalResult = await runGoal({ goal, passes, lintCommand, testCommand, checkTimeoutMs, dir, model, variant, tier, waitMs, agent, verbose });
+  const qa = await runAudit({ count: effectiveQaCount, depth: qaDepth, dir, model, variant, tier, waitMs, verbose });
   return { goal, goalResult, qa };
 }
