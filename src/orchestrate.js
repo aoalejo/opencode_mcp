@@ -1,7 +1,7 @@
 import { execFileSync, execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { startJob, getJob, waitForJob, jobSummary } from "./jobs.js";
+import { startJob, getJob, waitForJob, jobSummary, cancelJob } from "./jobs.js";
 import { resolveModel, pinnedModel } from "./tiers.js";
 import { ALL_LENS_KEYS, FINDING_FORMAT, resolveLenses, planParticipants } from "./lenses.js";
 
@@ -316,31 +316,96 @@ function trimJob(summary, { keepText = false } = {}) {
   return trimmed;
 }
 
+// How many opencode child processes this server will have IN FLIGHT at once
+// against a single local model backend, regardless of how wide a lens swarm
+// or replica count asks to go. Without this, `runReadOnlyBatch` used to start
+// EVERY participant's process simultaneously (48 at replicas:4/lenses:"all")
+// — a single local inference server can't usefully serve that many requests
+// concurrently, so most of them just queue, and queueing time (not prompt
+// size) is what actually blew through waitMs. Observed 2026-08-22: a
+// 138-segment sweep at replicas:4 ran 5h42m, completed only 21 segments, and
+// EVERY ONE of those 21 came back `incomplete` (reconciliation never
+// finished) or `failed` (2 with "Unexpected server error" — the backend
+// rejecting a request under load). This is the actual fix for that; the
+// per-source truncation and groupSize tree-reduction (see below) bound
+// prompt SIZE, but did nothing about request VOLUME.
+const DEFAULT_MAX_CONCURRENCY = 4;
+
 /**
- * Fan `count` jobs out IN PARALLEL (all started before any waitForJob), all
- * pinned to the same resolved model+variant and forced onto READONLY_AGENT so
- * "solo lectura forzado" is an actual permission-engine guarantee, not a
- * prompt request a model could ignore. Returns each participant's FULL
- * summary (including `text`/`prompt`) — this is the internal shape used to
- * build reconciliation prompts; callers returning this to the MCP layer must
- * trim it first via `trimJob`.
+ * Run `worker(item, index)` over `items` with at most `limit` concurrently
+ * in flight — NOT "start everything, then wait", but "start up to `limit`,
+ * start the next only once a slot actually frees up". `isCancelled()` is
+ * checked before picking up each new item so a sweep-level cancellation (see
+ * opencode_sweep_cancel) stops handing out new work promptly, without
+ * needing to forcibly abort whatever's already mid-flight in this wave.
  */
-async function runReadOnlyBatch({ count, buildPrompt, dir, model, variant, tier, waitMs, titlePrefix }) {
-  const resolved = resolveModel({ model, variant, tier });
-  const jobIds = [];
-  for (let i = 0; i < count; i++) {
-    const jobId = startJob({
-      prompt: buildPrompt(i, count) + HANDOFF_SUFFIX,
-      model: resolved.model,
-      variant: resolved.variant,
-      agent: READONLY_AGENT,
-      dir,
-      title: `${titlePrefix}-${i + 1}-of-${count}`,
-    });
-    jobIds.push(jobId);
+async function mapWithConcurrency(items, limit, worker, isCancelled) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function lane() {
+    while (next < items.length) {
+      if (isCancelled?.()) return;
+      const i = next++;
+      results[i] = await worker(items[i], i);
+    }
   }
-  await Promise.all(jobIds.map((id) => waitForJob(id, waitMs)));
-  return jobIds.map((id, i) => ({ index: i, ...jobSummary(getJob(id)) }));
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, lane));
+  return results;
+}
+
+/**
+ * A job whose summary still shows `status: "running"` after `waitForJob`
+ * returned didn't finish — it timed out, not completed or failed. Left
+ * alone, its underlying opencode process keeps running indefinitely (nothing
+ * else will ever wait on it or kill it) purely consuming a slot on the local
+ * backend that every OTHER concurrent job is competing for — directly
+ * worsening the exact contention problem that caused it to time out in the
+ * first place. Observed 2026-08-22: 129 live `opencode run` processes,
+ * including one 4h32m old (older than several already-timed-out segments),
+ * found only because the whole MCP server had to be killed by hand — there
+ * was no other way to stop them. Called after every wait, regardless of
+ * outcome, so a straggler never survives past the point nothing is looking
+ * at it anymore.
+ */
+function cancelIfStillRunning(summary) {
+  if (summary?.status === "running" && summary.jobId) {
+    cancelJob(summary.jobId);
+    return { ...summary, status: "failed", errorMessage: summary.errorMessage ?? "Timed out (waitMs elapsed) and was cancelled — the underlying process was still running with no result." };
+  }
+  return summary;
+}
+
+/**
+ * Fan `count` jobs out with bounded concurrency (see DEFAULT_MAX_CONCURRENCY),
+ * all pinned to the same resolved model+variant and forced onto
+ * READONLY_AGENT so "solo lectura forzado" is an actual permission-engine
+ * guarantee, not a prompt request a model could ignore. Returns each
+ * participant's FULL summary (including `text`/`prompt`) — this is the
+ * internal shape used to build reconciliation prompts; callers returning
+ * this to the MCP layer must trim it first via `trimJob`.
+ */
+async function runReadOnlyBatch({ count, buildPrompt, dir, model, variant, tier, waitMs, titlePrefix, maxConcurrency, isCancelled }) {
+  const resolved = resolveModel({ model, variant, tier });
+  const limit = Math.max(1, Number.isInteger(maxConcurrency) ? maxConcurrency : DEFAULT_MAX_CONCURRENCY);
+  const indices = Array.from({ length: count }, (_, i) => i);
+  const results = await mapWithConcurrency(
+    indices,
+    limit,
+    async (i) => {
+      const jobId = startJob({
+        prompt: buildPrompt(i, count) + HANDOFF_SUFFIX,
+        model: resolved.model,
+        variant: resolved.variant,
+        agent: READONLY_AGENT,
+        dir,
+        title: `${titlePrefix}-${i + 1}-of-${count}`,
+      });
+      await waitForJob(jobId, waitMs);
+      return cancelIfStillRunning({ index: i, ...jobSummary(getJob(jobId)) });
+    },
+    isCancelled
+  );
+  return results.filter(Boolean);
 }
 
 // Per-source cap on what reaches an aggregator. Without it the aggregator
@@ -373,7 +438,7 @@ async function aggregate({ instructions, sources, dir, model, variant, tier, wai
     title,
   });
   await waitForJob(jobId, waitMs);
-  return jobSummary(getJob(jobId));
+  return cancelIfStillRunning(jobSummary(getJob(jobId)));
 }
 
 const DEFAULT_GROUP_SIZE = 4;
@@ -421,8 +486,9 @@ function chunkEvenly(arr, maxSize) {
  * another is raised by 3 of 8 overall — CONFIRMED, even though neither
  * partial alone had it at 2+).
  */
-async function reduceSources({ sources, preface, leafInstructions, mergeInstructions, groupSize, dir, model, variant, tier, waitMs, titlePrefix }) {
+async function reduceSources({ sources, preface, leafInstructions, mergeInstructions, groupSize, dir, model, variant, tier, waitMs, titlePrefix, maxConcurrency, isCancelled }) {
   const size = Math.max(2, Number.isInteger(groupSize) ? groupSize : DEFAULT_GROUP_SIZE);
+  const limit = Math.max(1, Number.isInteger(maxConcurrency) ? maxConcurrency : DEFAULT_MAX_CONCURRENCY);
   const levels = [];
   let current = sources;
   let isLeaf = true;
@@ -430,8 +496,10 @@ async function reduceSources({ sources, preface, leafInstructions, mergeInstruct
 
   while (current.length > size) {
     const groups = chunkEvenly(current, size);
-    const results = await Promise.all(
-      groups.map((group) =>
+    const results = await mapWithConcurrency(
+      groups,
+      limit,
+      (group, gi) =>
         aggregate({
           instructions: isLeaf ? leafInstructions(group.length) : mergeInstructions(group.length),
           sources: isLeaf && preface ? [...preface, ...group] : group,
@@ -440,15 +508,24 @@ async function reduceSources({ sources, preface, leafInstructions, mergeInstruct
           variant,
           tier,
           waitMs,
-          title: `${titlePrefix}-l${level}-g${groups.indexOf(group) + 1}`,
-        })
-      )
+          title: `${titlePrefix}-l${level}-g${gi + 1}`,
+        }),
+      isCancelled
     );
-    levels.push({ level, groupCount: groups.length, jobs: results.map((r) => ({ status: r.status, tokens: r.tokens, cost: r.cost })) });
+    // A slot can be `undefined` if `isCancelled()` fired mid-wave — cancellation
+    // stops handing out new work, it doesn't backfill results for skipped items.
+    levels.push({ level, groupCount: groups.length, jobs: results.map((r) => (r ? { status: r.status, tokens: r.tokens, cost: r.cost } : { status: "cancelled" })) });
 
-    const failed = results.find((r) => r.status !== "completed");
-    if (failed) {
-      return { report: null, status: failed.status, errorMessage: failed.errorMessage, levels, incomplete: true };
+    const failedIndex = results.findIndex((r) => !r || r.status !== "completed");
+    if (failedIndex !== -1) {
+      const failed = results[failedIndex];
+      return {
+        report: null,
+        status: failed ? failed.status : "cancelled",
+        errorMessage: failed?.errorMessage ?? (isCancelled?.() ? "Cancelled before this group finished." : undefined),
+        levels,
+        incomplete: true,
+      };
     }
 
     current = results.map((r, gi) => ({
@@ -503,7 +580,7 @@ async function reduceSources({ sources, preface, leafInstructions, mergeInstruct
  * Returns { report (final markdown/text), depth, rounds (per-stage job
  * metadata for debugging), finalJob }.
  */
-async function reconcileRecursive({ participants, context, depth, count, dir, model, variant, tier, waitMs, emitFindingsBlock = false, groupSize }) {
+async function reconcileRecursive({ participants, context, depth, count, dir, model, variant, tier, waitMs, emitFindingsBlock = false, groupSize, maxConcurrency, isCancelled }) {
   const depthVal = clampDepth(depth);
   const rounds = [];
 
@@ -554,6 +631,8 @@ async function reconcileRecursive({ participants, context, depth, count, dir, mo
       `2 or more; otherwise it is LOW CONFIDENCE. Rank by severity.` +
       blockIf(depthVal === 0),
     groupSize,
+    maxConcurrency,
+    isCancelled,
     dir,
     model,
     variant,
@@ -586,6 +665,8 @@ async function reconcileRecursive({ participants, context, depth, count, dir, mo
       tier,
       waitMs,
       titlePrefix: `mcp-adversarial-r${round}`,
+      maxConcurrency,
+      isCancelled,
     });
     rounds.push({ stage: "adversarial", round, jobs: adversaries.map((a) => ({ status: a.status, tokens: a.tokens, cost: a.cost })) });
 
@@ -607,6 +688,8 @@ async function reconcileRecursive({ participants, context, depth, count, dir, mo
         `for transparency (never silently drop it). Keep everything already confirmed as-is. Rank by severity. ${context}` +
         blockIf(round === depthVal),
       groupSize,
+      maxConcurrency,
+      isCancelled,
       dir,
       model,
       variant,
@@ -651,6 +734,8 @@ async function runLensSwarm({
   count,
   depth,
   groupSize,
+  maxConcurrency,
+  isCancelled,
   dir,
   model,
   variant,
@@ -698,6 +783,8 @@ async function runLensSwarm({
     tier,
     waitMs,
     titlePrefix,
+    maxConcurrency,
+    isCancelled,
   });
   const participants = raw.map((p, i) => ({ ...p, lens: assignments[i].lens.key, lensTitle: assignments[i].lens.title }));
 
@@ -712,6 +799,8 @@ async function runLensSwarm({
     depth,
     count: assignments.length,
     groupSize,
+    maxConcurrency,
+    isCancelled,
     dir,
     model,
     variant,
@@ -738,6 +827,8 @@ export async function runAudit({
   replicas,
   lenses: lensSelection,
   groupSize,
+  maxConcurrency,
+  isCancelled,
   dir,
   model,
   variant,
@@ -802,6 +893,8 @@ export async function runAudit({
     count,
     depth,
     groupSize,
+    maxConcurrency,
+    isCancelled,
     dir,
     model,
     variant,
@@ -842,7 +935,7 @@ export { runLensSwarm };
  * deterministic model would otherwise just duplicate each other) instead of
  * a fixed lens list, since the question itself is open-ended.
  */
-export async function runInvestigate({ prompt, count, groupSize, dir, model, variant, tier, waitMs, depth = 1, verbose = false }) {
+export async function runInvestigate({ prompt, count, groupSize, maxConcurrency, isCancelled, dir, model, variant, tier, waitMs, depth = 1, verbose = false }) {
   const n = clampCount(count, defaultWidth({ model, tier }, 16, 5));
   const buildPrompt = (i, total) =>
     `${prompt}\n\n---\nYou are investigator #${i + 1} of ${total} looking into this independently. ` +
@@ -859,11 +952,13 @@ export async function runInvestigate({ prompt, count, groupSize, dir, model, var
     tier,
     waitMs,
     titlePrefix: "mcp-investigate",
+    maxConcurrency,
+    isCancelled,
   });
 
   const context = `${n} independent read-only investigators looked into the question: "${prompt}"`;
 
-  const reconciliation = await reconcileRecursive({ participants, context, depth, count: n, groupSize, dir, model, variant, tier, waitMs });
+  const reconciliation = await reconcileRecursive({ participants, context, depth, count: n, groupSize, maxConcurrency, isCancelled, dir, model, variant, tier, waitMs });
   const participantsForReturn = participants.map((p) => ({ index: p.index, ...trimJob(p, { keepText: verbose }) }));
 
   return { prompt, participantCount: n, participants: participantsForReturn, reconciliation };
@@ -978,9 +1073,9 @@ export async function runGoal({ goal, dir, passes, lintCommand, testCommand, che
  * decide what (if anything) to do with the QA findings (fix them, ignore
  * them, ask the user).
  */
-export async function runJob({ goal, dir, passes, lintCommand, testCommand, checkTimeoutMs, qaCount, qaDepth = 1, model, variant, tier, waitMs, agent, verbose = false }) {
+export async function runJob({ goal, dir, passes, lintCommand, testCommand, checkTimeoutMs, qaCount, qaDepth = 1, maxConcurrency, model, variant, tier, waitMs, agent, verbose = false }) {
   const effectiveQaCount = qaCount ?? defaultWidth({ model, tier }, 16, 8);
   const goalResult = await runGoal({ goal, passes, lintCommand, testCommand, checkTimeoutMs, dir, model, variant, tier, waitMs, agent, verbose });
-  const qa = await runAudit({ count: effectiveQaCount, depth: qaDepth, dir, model, variant, tier, waitMs, verbose });
+  const qa = await runAudit({ count: effectiveQaCount, depth: qaDepth, maxConcurrency, dir, model, variant, tier, waitMs, verbose });
   return { goal, goalResult, qa };
 }

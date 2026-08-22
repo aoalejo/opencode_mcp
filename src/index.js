@@ -24,7 +24,7 @@ import { computeTierMap } from "./rank.js";
 import { readUsageLog, summarizeUsage } from "./usage.js";
 import { runAudit, runInvestigate, runGoal, runJob, MAX_PARTICIPANTS } from "./orchestrate.js";
 import { ALL_LENS_KEYS, DEFAULT_LENS_KEYS, MIN_REPLICAS } from "./lenses.js";
-import { runSweep, planSweep, loadSweep, listSweeps } from "./sweep.js";
+import { runSweep, planSweep, loadSweep, listSweeps, requestSweepCancel } from "./sweep.js";
 import { tableOfContents, findSection, fullReadme } from "./help.js";
 
 /**
@@ -523,11 +523,12 @@ server.tool(
     waitMs: z.number().int().min(1000).max(540000).optional().describe(`Per-job wait cap. Default ${ORCHESTRATION_WAIT_MS}.`),
     depth: z.number().int().min(0).max(3).optional().describe(`Adversarial-round-then-reaggregate repetitions (default 1). 0 skips adversarial verification entirely (fastest/cheapest); 1 = one round; 2 = two rounds for higher-criticality reviews (more rigor, more cost).`),
     groupSize: z.number().int().min(2).optional().describe("How many sources (participant findings, or adversarial reviews) each single aggregator call digests before its output is merged with sibling groups' — a TREE reduction instead of one aggregator reading every participant at once. Default 4. Lower this if you have many replicas/lenses and see aggregation timing out or coming back empty (a flat aggregator's prompt scales with participant count x output length); raising it trades fewer, larger aggregator calls for less merge overhead. Leaf-level groups run in parallel regardless of this value."),
+    maxConcurrency: z.number().int().min(1).optional().describe("Max opencode processes running AT ONCE against the model backend, regardless of total participant/replica count. Default 4. This is the actual fix for aggregation timing out at high replica counts — groupSize bounds prompt SIZE, this bounds request VOLUME; a single local backend serving 40+ simultaneous requests just queues them, and queueing time (not prompt size) is what blows through waitMs. Lower it further if you're seeing 'Unexpected server error' responses (backend overload) or a local model that's otherwise being used for other things at the same time."),
     verbose: z.boolean().optional().describe("Default false: participants carry only status/tokens/cost, never the underlying prompt. Set true to also include each participant's own raw findings text — useful for debugging the reconciliation, not needed for normal use."),
   },
-  async ({ count, replicas, lenses, groupSize, contextFile, dir, baseCommit, focus, tier, model, variant, waitMs, depth, verbose }) => {
+  async ({ count, replicas, lenses, groupSize, maxConcurrency, contextFile, dir, baseCommit, focus, tier, model, variant, waitMs, depth, verbose }) => {
     try {
-      return ok(await runAudit({ count, replicas, lenses, groupSize, contextFile, dir, baseCommit, focus, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS, depth: depth ?? 1, verbose: verbose ?? false }));
+      return ok(await runAudit({ count, replicas, lenses, groupSize, maxConcurrency, contextFile, dir, baseCommit, focus, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS, depth: depth ?? 1, verbose: verbose ?? false }));
     } catch (e) {
       return err(String(e.message ?? e));
     }
@@ -547,11 +548,12 @@ server.tool(
     waitMs: z.number().int().min(1000).max(540000).optional().describe(`Per-job wait cap. Default ${ORCHESTRATION_WAIT_MS}.`),
     depth: z.number().int().min(0).max(3).optional().describe(`Adversarial-round-then-reaggregate repetitions (default 1). 0 skips adversarial verification entirely (fastest/cheapest); 1 = one round; 2 = two rounds for higher-criticality investigations (more rigor, more cost).`),
     groupSize: z.number().int().min(2).optional().describe("How many sources each single aggregator call digests before merging with sibling groups — a tree reduction instead of one aggregator reading every participant at once. Default 4."),
+    maxConcurrency: z.number().int().min(1).optional().describe("Max opencode processes running AT ONCE against the model backend, regardless of total participant count. Default 4 — the actual fix for aggregation timing out at high counts (groupSize bounds prompt size, this bounds request volume against a backend that can't usefully serve many requests at once)."),
     verbose: z.boolean().optional().describe("Default false: participants carry only status/tokens/cost, never the underlying prompt. Set true to also include each participant's own raw findings text."),
   },
-  async ({ prompt, count, groupSize, dir, tier, model, variant, waitMs, depth, verbose }) => {
+  async ({ prompt, count, groupSize, maxConcurrency, dir, tier, model, variant, waitMs, depth, verbose }) => {
     try {
-      return ok(await runInvestigate({ prompt, count, groupSize, dir, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS, depth: depth ?? 1, verbose: verbose ?? false }));
+      return ok(await runInvestigate({ prompt, count, groupSize, maxConcurrency, dir, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS, depth: depth ?? 1, verbose: verbose ?? false }));
     } catch (e) {
       return err(String(e.message ?? e));
     }
@@ -621,7 +623,7 @@ const runningSweeps = new Map();
 
 server.tool(
   "opencode_sweep",
-  `Audit an ENTIRE codebase, not just a diff. Segments the repo into token-budgeted chunks, runs the full lens swarm (see opencode_audit) over each segment in turn, and accumulates confirmed findings into a ledger that is injected into every LATER segment — so reviewers stop re-reporting known bugs and instead hunt for OTHER instances of the same bug class. Refuted findings are carried forward too, so a false positive dismissed in segment 3 isn't re-litigated in segment 12.\n\nSegments are packed by PATH, not by size, so a directory stays together and cross-file defects (caller vs callee, two symmetric paths updated inconsistently) are visible within one segment. A segment is a STARTING POINT, not a cage: reviewers are told to follow a flow across any other file in the repo when tracing it end-to-end is what the lens requires.\n\nFile selection is language-agnostic and yours to control: \`sourceExtensions\` picks what counts as source, \`includeGlobs\`/\`excludeGlobs\` narrow it further, and generated files are detected both by pattern (\`*.g.*\`, \`*.pb.*\`, \`*.generated.*\`, lockfiles, vendor/build dirs) and by sniffing for \`@generated\`-style headers in any language. ALWAYS run with \`plan: true\` first — it returns the file/segment breakdown and job estimate for free, with no agents spawned, so you can fix your filters before committing to a run that takes an hour.\n\nThis tool RETURNS IMMEDIATELY with a \`sweepId\`; the sweep continues in the background. Poll opencode_sweep_status for progress and the final report. A full markdown report is rewritten to disk after every segment, so partial results are always recoverable.`,
+  `Audit an ENTIRE codebase, not just a diff. Segments the repo into token-budgeted chunks, runs the full lens swarm (see opencode_audit) over each segment in turn, and accumulates confirmed findings into a ledger that is injected into every LATER segment — so reviewers stop re-reporting known bugs and instead hunt for OTHER instances of the same bug class. Refuted findings are carried forward too, so a false positive dismissed in segment 3 isn't re-litigated in segment 12.\n\nSegments are packed by PATH, not by size, so a directory stays together and cross-file defects (caller vs callee, two symmetric paths updated inconsistently) are visible within one segment. A segment is a STARTING POINT, not a cage: reviewers are told to follow a flow across any other file in the repo when tracing it end-to-end is what the lens requires.\n\nFile selection is language-agnostic and yours to control: \`sourceExtensions\` picks what counts as source, \`includeGlobs\`/\`excludeGlobs\` narrow it further, and generated files are detected both by pattern (\`*.g.*\`, \`*.pb.*\`, \`*.generated.*\`, lockfiles, vendor/build dirs) and by sniffing for \`@generated\`-style headers in any language. ALWAYS run with \`plan: true\` first — it returns the file/segment breakdown and job estimate for free, with no agents spawned, so you can fix your filters before committing to a run that takes an hour.\n\nThis tool RETURNS IMMEDIATELY with a \`sweepId\`; the sweep continues in the background. Poll opencode_sweep_status for progress and the final report. A full markdown report is rewritten to disk after every segment, so partial results are always recoverable. Call opencode_sweep_cancel with the \`sweepId\` to stop a sweep that's misbehaving or no longer needed — it stops promptly rather than only between segments, and there is no other way to stop one short of restarting this whole MCP server.`,
   {
     dir: z.string().optional().describe("Absolute path of the repo to sweep. Defaults to this server's cwd."),
     plan: z.boolean().optional().describe("If true, spawn NOTHING — just return which files/segments would be reviewed plus a job estimate. Run this first, always."),
@@ -630,6 +632,7 @@ server.tool(
     replicas: z.number().int().min(MIN_REPLICAS).optional().describe(`Independent reviewers per lens, per segment. Default ${MIN_REPLICAS}, minimum ${MIN_REPLICAS}. Multiplies total runtime — check the \`plan\` estimate before raising it.`),
     depth: z.number().int().min(0).max(3).optional().describe("Adversarial verification rounds per segment (default 1). 0 is much faster and much noisier across a whole repo; 1 is the sane default here."),
     groupSize: z.number().int().min(2).optional().describe("How many participant/adversary outputs each single aggregator call digests before merging with sibling groups — a tree reduction instead of one aggregator reading everyone at once. Default 4. Lower this if segments come back with an empty report (the flat aggregator's prompt scales with lenses x replicas x output length and can outrun waitMs at high replica counts)."),
+    maxConcurrency: z.number().int().min(1).optional().describe("Max opencode processes running AT ONCE per segment, regardless of lenses x replicas. Default 4. This is the actual fix for a segment's aggregation never finishing at high replica counts: groupSize bounds prompt SIZE, this bounds request VOLUME against the model backend — a local server serving 40+ simultaneous requests just queues them, and that queueing (not prompt size) is what exhausts waitMs. Observed 2026-08-22: replicas:4 (48 participants/segment) with the default concurrency produced 21/21 segments incomplete or failed over 5h42m; lowering this is the fix, not raising waitMs."),
     budgetTokens: z.number().int().min(4000).optional().describe("Approx token budget per segment (default 40000). Lower = more, smaller segments = slower but more focused."),
     includeGlobs: z.array(z.string()).optional().describe('Restrict the sweep to paths matching these globs, e.g. ["lib/**", "src/**"]. Supports ** and *.'),
     excludeGlobs: z.array(z.string()).optional().describe("Extra globs to exclude, on top of the built-in vendor/build/generated/lockfile defaults."),
@@ -643,9 +646,9 @@ server.tool(
     variant: z.string().optional().describe("Reasoning-effort variant to pair with an explicit model."),
     waitMs: z.number().int().min(1000).max(540000).optional().describe(`Per-JOB wait cap (not per sweep). Default ${ORCHESTRATION_WAIT_MS}.`),
   },
-  async ({ plan, verbose, dir, lenses, replicas, depth, groupSize, budgetTokens, includeGlobs, excludeGlobs, sourceExtensions, skipGeneratedSniff, maxSegments, contextFile, focus, tier, model, variant, waitMs }) => {
+  async ({ plan, verbose, dir, lenses, replicas, depth, groupSize, maxConcurrency, budgetTokens, includeGlobs, excludeGlobs, sourceExtensions, skipGeneratedSniff, maxSegments, contextFile, focus, tier, model, variant, waitMs }) => {
     try {
-      const common = { dir, lenses, replicas, depth: depth ?? 1, groupSize, budgetTokens, includeGlobs, excludeGlobs, sourceExtensions, skipGeneratedSniff, maxSegments, contextFile, focus, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS };
+      const common = { dir, lenses, replicas, depth: depth ?? 1, groupSize, maxConcurrency, budgetTokens, includeGlobs, excludeGlobs, sourceExtensions, skipGeneratedSniff, maxSegments, contextFile, focus, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS };
       if (plan) return ok({ plan: true, ...planSweep({ ...common, verbose }) });
 
       const preview = planSweep(common);
@@ -728,6 +731,33 @@ server.tool(
           ...(verbose ? { report: s.report } : {}),
         })),
       });
+    } catch (e) {
+      return err(String(e.message ?? e));
+    }
+  }
+);
+
+server.tool(
+  "opencode_sweep_cancel",
+  "Stop a sweep started with opencode_sweep. Before this existed, the only way to stop a misbehaving or no-longer-needed sweep was to kill the entire MCP server process, taking every other tool down with it for the rest of the session — observed 2026-08-22 needing exactly that after a sweep ran 5h42m without a single segment completing successfully. This checks cooperatively: it stops the sweep from starting its next segment, AND stops its current segment's concurrency-limited dispatch from picking up any new work — so it typically responds within one wave (bounded by `maxConcurrency`) rather than only at the next segment boundary. Whatever's already mid-flight in that last wave still runs to its own completion or waitMs, same as any other job. Poll opencode_sweep_status afterward to confirm `status` reached `cancelled`.",
+  {
+    sweepId: z.string().describe("The sweep to cancel."),
+  },
+  async ({ sweepId }) => {
+    try {
+      const inMemory = runningSweeps.has(sweepId);
+      const state = runningSweeps.get(sweepId) ?? loadSweep(sweepId);
+      if (!state) return err(`No sweep with id "${sweepId}" (checked memory and ${"~/.local/share/opencode-mcp/sweeps"}).`);
+      if (state.status !== "running") return ok({ sweepId, status: state.status, message: `Sweep is already ${state.status}, nothing to cancel.` });
+      // Cancellation is an in-process signal (same constraint as opencode_cancel_job)
+      // — it only actually stops the sweep if IT is what's running the loop.
+      if (!inMemory) {
+        return err(
+          `Sweep "${sweepId}" is on disk as "running" but is not tracked by THIS server process — it's either running under a different Claude Code session's opencode-mcp process, or its process already died without updating its final status. Cancellation only works against the process actually running the loop; find and cancel it from that session, or if the process is gone, treat this sweep as stalled.`
+        );
+      }
+      requestSweepCancel(sweepId);
+      return ok({ sweepId, status: "cancelling", message: "Cancellation requested. Poll opencode_sweep_status — status will reach 'cancelled' once the current wave of in-flight jobs finishes (bounded by maxConcurrency), typically well before the current segment itself would have finished." });
     } catch (e) {
       return err(String(e.message ?? e));
     }

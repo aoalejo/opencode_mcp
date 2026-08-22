@@ -8,6 +8,24 @@ import { resolveLenses } from "./lenses.js";
 
 const SWEEP_DIR = path.join(homedir(), ".local", "share", "opencode-mcp", "sweeps");
 
+// Cooperative cancellation: there was previously NO way to stop a running
+// sweep short of killing the whole MCP server process (which takes the tool
+// down for the entire session) — observed 2026-08-22 needing exactly that
+// after a sweep at replicas:4 ran 5h42m without a single segment completing
+// successfully. `isSweepCancelled` is checked both between segments and
+// inside each segment's concurrency-limited dispatch (see
+// `mapWithConcurrency`'s `isCancelled` param in orchestrate.js), so a cancel
+// request stops handing out new work promptly rather than only at the next
+// segment boundary — worst case it still finishes whatever's already
+// in-flight for the current wave (bounded by `maxConcurrency`).
+const cancelledSweeps = new Set();
+export function requestSweepCancel(sweepId) {
+  cancelledSweeps.add(sweepId);
+}
+export function isSweepCancelled(sweepId) {
+  return cancelledSweeps.has(sweepId);
+}
+
 /** Rough chars-per-token, same convention used elsewhere in this repo. */
 const CHARS_PER_TOKEN = 4;
 const DEFAULT_SEGMENT_TOKENS = 40_000;
@@ -343,6 +361,7 @@ export async function runSweep(opts) {
     replicas,
     depth = 1,
     groupSize,
+    maxConcurrency,
     budgetTokens = DEFAULT_SEGMENT_TOKENS,
     includeGlobs,
     excludeGlobs,
@@ -407,6 +426,12 @@ export async function runSweep(opts) {
 
   try {
     for (const seg of segments) {
+      if (isSweepCancelled(state.sweepId)) {
+        state.status = "cancelled";
+        console.error(`[opencode-mcp] sweep ${state.sweepId}: cancellation requested, stopping before segment ${seg.index + 1}/${segments.length}.`);
+        break;
+      }
+
       const entry = state.segments[seg.index];
       entry.status = "running";
       entry.startedAt = Date.now();
@@ -426,6 +451,8 @@ export async function runSweep(opts) {
           replicas,
           depth,
           groupSize,
+          maxConcurrency,
+          isCancelled: () => isSweepCancelled(state.sweepId),
           dir: cwd,
           model,
           variant,
@@ -474,12 +501,13 @@ export async function runSweep(opts) {
       persistSweep(state);
       onUpdate?.(state);
     }
-    state.status = "completed";
+    if (state.status !== "cancelled") state.status = "completed";
   } catch (e) {
     state.status = "failed";
     state.error = String(e.message ?? e);
   }
 
+  cancelledSweeps.delete(state.sweepId);
   state.finishedAt = Date.now();
   state.reportPath = writeReport(state);
   persistSweep(state);
