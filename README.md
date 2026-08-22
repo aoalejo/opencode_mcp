@@ -565,6 +565,16 @@ Check `fileCount`, `segmentCount`, `estimatedJobs`, and the `skipped` counts
 before committing to a run — the estimate is how you find out a sweep would
 take six hours *before* it takes six hours.
 
+**Then trial one segment before committing to all of them.** Pass
+`maxSegments: 1` with the exact same `lenses`/`replicas`/`maxConcurrency`
+you're about to run for real — this exercises the complete pipeline (full
+lens fan-out, tree-reduction aggregation, the adversarial round, ledger
+emission) at real scale, in a fraction of the wall-clock time. It's how you
+find out your `maxConcurrency` is wrong for this backend, or that a lens is
+producing garbage, before spending hours discovering it one segment at a
+time. Once a single segment behaves the way you expect, drop `maxSegments`
+and run the whole thing.
+
 **File selection is language-agnostic and yours to override.** Defaults exclude
 vendor/build dirs, lockfiles, minified bundles, and generated-code patterns
 (`*.g.*`, `*.pb.*`, `*.generated.*`, `*.freezed.*`); files are additionally
@@ -579,6 +589,26 @@ immediately and `opencode_sweep_status` polls it. Full state is checkpointed to
 `<id>.md` is **rewritten after every segment**, so partial results are readable
 while it runs and survive the process dying. Segments run strictly sequentially
 — parallelising them would break the ledger's whole purpose.
+
+**Polling shows real progress, not just "running."** The active segment's
+`phase` field updates live at every meaningful transition — participant N/M
+finished, aggregator-tree level 1 group 3/6 done, entering the adversarial
+round — not just at segment start/end. A segment sitting at `status: running`
+for 40 minutes with `phase` visibly advancing is a healthy sweep; one where
+`phase` hasn't changed across several polls is worth investigating (check
+whether the model backend itself is actually responding — a network-level
+hang looks identical to genuine work from the outside if you're not watching
+this field).
+
+**Cancel it if it's not going well.** `opencode_sweep_cancel` stops a running
+sweep — before it existed the only way was killing the whole MCP server
+process, taking every other tool down with it for the rest of the session. It
+checks cooperatively (between segments, and inside the current segment's
+concurrency-limited dispatch), so it typically responds within one wave —
+bounded by `maxConcurrency` — rather than only at the next segment boundary.
+It's an in-process signal, same constraint as `opencode_cancel_job`: it can
+only stop a sweep that the server process handling this call is itself
+running.
 
 ### Briefing another agent to run a sweep
 
@@ -604,20 +634,40 @@ repo knows what's generated, vendored, or irrelevant in it.
 > list: if something important was excluded, or something generated slipped
 > through, fix the filters and re-plan. Do not skip this step.
 >
-> **Step 3 — confirm scale before spending an hour.** Report the plan back to
-> me — file count, segment count, estimated jobs — and say roughly how long you
-> expect it to take, before starting the real run. If it looks unreasonable,
-> propose narrowing `includeGlobs` to the most important area, or using
-> `maxSegments` to trial the first few segments.
+> **Step 3 — confirm scale, then trial exactly one segment.** Report the plan
+> back to me — file count, segment count, estimated jobs — and say roughly how
+> long the full run would take. Then call `opencode_sweep` again WITHOUT
+> `plan` but WITH `maxSegments: 1` and the exact same `lenses`/`replicas` you
+> intend to use for real. This exercises the complete pipeline (fan-out, tree
+> aggregation, the adversarial round, ledger emission) at real scale in a
+> fraction of the time — it's how you catch a wrong `maxConcurrency`, a
+> misbehaving lens, or a backend that can't actually keep up, before finding
+> out three segments into a six-hour run. Poll `opencode_sweep_status` while
+> it runs (see below) and confirm the trial segment reaches `completed`, not
+> `incomplete` or `failed`, before proceeding.
 >
-> **Step 4 — run it.** Call `opencode_sweep` again without `plan`, same
-> arguments. It returns a `sweepId` immediately and runs in the background;
-> there is NO notification when it finishes. Poll `opencode_sweep_status` with
-> that `sweepId` periodically. The `reportPath` it returns points at a markdown
-> report that is rewritten after every segment, so it's readable while the
-> sweep is still going.
+> **Step 4 — tune `maxConcurrency` if the trial showed trouble.** If the trial
+> segment came back `incomplete` (reconciliation never finished) or included
+> "Unexpected server error" responses, the model backend couldn't keep up with
+> the request volume — lower `maxConcurrency` (default 4) and re-trial rather
+> than raising `waitMs`, which doesn't address the actual cause. If it
+> finished cleanly and you know the backend can genuinely serve more
+> concurrent requests, you can raise `maxConcurrency` instead of leaving
+> capacity idle.
 >
-> **Step 5 — report back.** When `status` is `completed`, read the report file
+> **Step 5 — run it for real.** Call `opencode_sweep` again without `plan` or
+> `maxSegments`, same `lenses`/`replicas`/`maxConcurrency` that worked in the
+> trial. It returns a `sweepId` immediately and runs in the background; there
+> is NO notification when it finishes. Poll `opencode_sweep_status` with that
+> `sweepId` periodically — the active segment's `phase` field updates live
+> (e.g. "Reviewing: 30/48 participant(s) finished"), so you can tell real
+> progress from a stall without waiting for a segment to complete. The
+> `reportPath` it returns points at a markdown report rewritten after every
+> segment, so it's readable while the sweep is still going. If something looks
+> wrong mid-run, `opencode_sweep_cancel` stops it — you don't have to let a bad
+> run finish just because it started.
+>
+> **Step 6 — report back.** When `status` is `completed`, read the report file
 > and summarise: the confirmed findings grouped by severity, which are worth
 > acting on now, and which look like false positives to you. Do NOT fix
 > anything yet — verify each high-severity finding against the real code
