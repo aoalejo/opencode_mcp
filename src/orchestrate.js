@@ -352,14 +352,17 @@ export function resolveDefaultMaxConcurrency() {
  * opencode_sweep_cancel) stops handing out new work promptly, without
  * needing to forcibly abort whatever's already mid-flight in this wave.
  */
-async function mapWithConcurrency(items, limit, worker, isCancelled) {
+async function mapWithConcurrency(items, limit, worker, isCancelled, onItemDone) {
   const results = new Array(items.length);
   let next = 0;
+  let done = 0;
   async function lane() {
     while (next < items.length) {
       if (isCancelled?.()) return;
       const i = next++;
       results[i] = await worker(items[i], i);
+      done++;
+      onItemDone?.(done, items.length);
     }
   }
   await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, lane));
@@ -397,10 +400,11 @@ function cancelIfStillRunning(summary) {
  * internal shape used to build reconciliation prompts; callers returning
  * this to the MCP layer must trim it first via `trimJob`.
  */
-async function runReadOnlyBatch({ count, buildPrompt, dir, model, variant, tier, waitMs, titlePrefix, maxConcurrency, isCancelled }) {
+async function runReadOnlyBatch({ count, buildPrompt, dir, model, variant, tier, waitMs, titlePrefix, maxConcurrency, isCancelled, onProgress }) {
   const resolved = resolveModel({ model, variant, tier });
   const limit = Math.max(1, Number.isInteger(maxConcurrency) ? maxConcurrency : resolveDefaultMaxConcurrency());
   const indices = Array.from({ length: count }, (_, i) => i);
+  onProgress?.({ stage: "participants", label: titlePrefix, done: 0, total: count });
   const results = await mapWithConcurrency(
     indices,
     limit,
@@ -416,7 +420,8 @@ async function runReadOnlyBatch({ count, buildPrompt, dir, model, variant, tier,
       await waitForJob(jobId, waitMs);
       return cancelIfStillRunning({ index: i, ...jobSummary(getJob(jobId)) });
     },
-    isCancelled
+    isCancelled,
+    (done, total) => onProgress?.({ stage: "participants", label: titlePrefix, done, total })
   );
   return results.filter(Boolean);
 }
@@ -499,7 +504,7 @@ function chunkEvenly(arr, maxSize) {
  * another is raised by 3 of 8 overall — CONFIRMED, even though neither
  * partial alone had it at 2+).
  */
-async function reduceSources({ sources, preface, leafInstructions, mergeInstructions, groupSize, dir, model, variant, tier, waitMs, titlePrefix, maxConcurrency, isCancelled }) {
+async function reduceSources({ sources, preface, leafInstructions, mergeInstructions, groupSize, dir, model, variant, tier, waitMs, titlePrefix, maxConcurrency, isCancelled, onProgress }) {
   const size = Math.max(2, Number.isInteger(groupSize) ? groupSize : DEFAULT_GROUP_SIZE);
   const limit = Math.max(1, Number.isInteger(maxConcurrency) ? maxConcurrency : resolveDefaultMaxConcurrency());
   const levels = [];
@@ -509,6 +514,7 @@ async function reduceSources({ sources, preface, leafInstructions, mergeInstruct
 
   while (current.length > size) {
     const groups = chunkEvenly(current, size);
+    onProgress?.({ stage: "aggregate-tree", label: titlePrefix, level, done: 0, total: groups.length });
     const results = await mapWithConcurrency(
       groups,
       limit,
@@ -523,7 +529,8 @@ async function reduceSources({ sources, preface, leafInstructions, mergeInstruct
           waitMs,
           title: `${titlePrefix}-l${level}-g${gi + 1}`,
         }),
-      isCancelled
+      isCancelled,
+      (done, total) => onProgress?.({ stage: "aggregate-tree", label: titlePrefix, level, done, total })
     );
     // A slot can be `undefined` if `isCancelled()` fired mid-wave — cancellation
     // stops handing out new work, it doesn't backfill results for skipped items.
@@ -550,6 +557,7 @@ async function reduceSources({ sources, preface, leafInstructions, mergeInstruct
     level++;
   }
 
+  onProgress?.({ stage: "aggregate-final", label: titlePrefix, level });
   const final = await aggregate({
     instructions: isLeaf ? leafInstructions(current.length) : mergeInstructions(current.length),
     sources: isLeaf && preface ? [...preface, ...current] : current,
@@ -593,7 +601,7 @@ async function reduceSources({ sources, preface, leafInstructions, mergeInstruct
  * Returns { report (final markdown/text), depth, rounds (per-stage job
  * metadata for debugging), finalJob }.
  */
-async function reconcileRecursive({ participants, context, depth, count, dir, model, variant, tier, waitMs, emitFindingsBlock = false, groupSize, maxConcurrency, isCancelled }) {
+async function reconcileRecursive({ participants, context, depth, count, dir, model, variant, tier, waitMs, emitFindingsBlock = false, groupSize, maxConcurrency, isCancelled, onProgress }) {
   const depthVal = clampDepth(depth);
   const rounds = [];
 
@@ -627,7 +635,9 @@ async function reconcileRecursive({ participants, context, depth, count, dir, mo
   // round for it would just be parsed and thrown away until the final one.
   const blockIf = (isFinal) => (emitFindingsBlock && isFinal ? FINDINGS_BLOCK_INSTRUCTION : "");
 
+  onProgress?.({ stage: "round", round: 0, label: "aggregating participant findings" });
   const round0 = await reduceSources({
+    onProgress: (e) => onProgress?.({ ...e, round: 0 }),
     sources: participants.map((p, i) => ({ label: `Participant ${i + 1}${p.lens ? ` (lens: ${p.lens})` : ""}`, text: p.text, status: p.status, errorMessage: p.errorMessage })),
     leafInstructions: (n) =>
       `You are the aggregator for an independent multi-agent review. ${context}\n\n` +
@@ -669,6 +679,7 @@ async function reconcileRecursive({ participants, context, depth, count, dir, mo
       `reporte a ciegas. Para cada low-confidence finding que revises, decí explícitamente si te parece REAL o un FALSO ` +
       `POSITIVO, con tu justificación.\n\nREPORTE A AUDITAR:\n${report.text}\n\n${context}`;
 
+    onProgress?.({ stage: "round", round, label: `adversarial review (round ${round}/${depthVal})` });
     const adversaries = await runReadOnlyBatch({
       count,
       buildPrompt: adversarialPrompt,
@@ -680,10 +691,13 @@ async function reconcileRecursive({ participants, context, depth, count, dir, mo
       titlePrefix: `mcp-adversarial-r${round}`,
       maxConcurrency,
       isCancelled,
+      onProgress: (e) => onProgress?.({ ...e, round }),
     });
     rounds.push({ stage: "adversarial", round, jobs: adversaries.map((a) => ({ status: a.status, tokens: a.tokens, cost: a.cost })) });
 
+    onProgress?.({ stage: "round", round, label: `reaggregating after adversarial round ${round}/${depthVal}` });
     const reaggregated = await reduceSources({
+      onProgress: (e) => onProgress?.({ ...e, round }),
       sources: adversaries.map((a, i) => ({ label: `Adversarial reviewer ${i + 1}`, text: a.text, status: a.status, errorMessage: a.errorMessage })),
       preface: [{ label: "Previous report (context for every group below)", text: report.text, status: report.status }],
       leafInstructions: (n) =>
@@ -749,6 +763,7 @@ async function runLensSwarm({
   groupSize,
   maxConcurrency,
   isCancelled,
+  onProgress,
   dir,
   model,
   variant,
@@ -798,6 +813,7 @@ async function runLensSwarm({
     titlePrefix,
     maxConcurrency,
     isCancelled,
+    onProgress,
   });
   const participants = raw.map((p, i) => ({ ...p, lens: assignments[i].lens.key, lensTitle: assignments[i].lens.title }));
 
@@ -814,6 +830,7 @@ async function runLensSwarm({
     groupSize,
     maxConcurrency,
     isCancelled,
+    onProgress,
     dir,
     model,
     variant,
@@ -842,6 +859,7 @@ export async function runAudit({
   groupSize,
   maxConcurrency,
   isCancelled,
+  onProgress,
   dir,
   model,
   variant,
@@ -908,6 +926,7 @@ export async function runAudit({
     groupSize,
     maxConcurrency,
     isCancelled,
+    onProgress,
     dir,
     model,
     variant,
@@ -948,7 +967,7 @@ export { runLensSwarm };
  * deterministic model would otherwise just duplicate each other) instead of
  * a fixed lens list, since the question itself is open-ended.
  */
-export async function runInvestigate({ prompt, count, groupSize, maxConcurrency, isCancelled, dir, model, variant, tier, waitMs, depth = 1, verbose = false }) {
+export async function runInvestigate({ prompt, count, groupSize, maxConcurrency, isCancelled, onProgress, dir, model, variant, tier, waitMs, depth = 1, verbose = false }) {
   const n = clampCount(count, defaultWidth({ model, tier }, 16, 5));
   const buildPrompt = (i, total) =>
     `${prompt}\n\n---\nYou are investigator #${i + 1} of ${total} looking into this independently. ` +
@@ -967,11 +986,12 @@ export async function runInvestigate({ prompt, count, groupSize, maxConcurrency,
     titlePrefix: "mcp-investigate",
     maxConcurrency,
     isCancelled,
+    onProgress,
   });
 
   const context = `${n} independent read-only investigators looked into the question: "${prompt}"`;
 
-  const reconciliation = await reconcileRecursive({ participants, context, depth, count: n, groupSize, maxConcurrency, isCancelled, dir, model, variant, tier, waitMs });
+  const reconciliation = await reconcileRecursive({ participants, context, depth, count: n, groupSize, maxConcurrency, isCancelled, onProgress, dir, model, variant, tier, waitMs });
   const participantsForReturn = participants.map((p) => ({ index: p.index, ...trimJob(p, { keepText: verbose }) }));
 
   return { prompt, participantCount: n, participants: participantsForReturn, reconciliation };

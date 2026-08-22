@@ -688,7 +688,7 @@ server.tool(
 
 server.tool(
   "opencode_sweep_status",
-  "Check a sweep started with opencode_sweep. Returns progress (segments done / total), the accumulated confirmed-findings ledger, and the path to the full markdown report on disk (rewritten after every segment, so it's useful long before the sweep finishes). Reads from disk, so it works across a server restart or from a different session. Omit `sweepId` to list all known sweeps newest-first.\n\nDefault output is LEAN and built for repeated polling: a `segmentCounts` breakdown by status, plus a `segments` array containing ONLY segments that have actually started (never the still-`pending` ones — on a large sweep those are most of them and carry zero information until their turn comes). Pass `verbose: true` to also get every `pending` segment listed and each active segment's full reconciled report text.",
+  "Check a sweep started with opencode_sweep. Returns progress (segments done / total), the accumulated confirmed-findings ledger, and the path to the full markdown report on disk (rewritten after every segment, so it's useful long before the sweep finishes). Reads from disk, so it works across a server restart or from a different session. Omit `sweepId` to list all known sweeps newest-first.\n\nDefault output is LEAN and built for repeated polling: a `segmentCounts` breakdown by status, plus a `segments` array containing ONLY segments that have actually started (never the still-`pending` ones — on a large sweep those are most of them and carry zero information until their turn comes). Each active segment's `phase` field updates LIVE, not just at segment boundaries — e.g. \"Reviewing: 12/48 participant(s) finished\", \"Aggregating (adversarial round 1): level 0, 3/6 group(s) done\" — so a segment sitting at status `running` for a long time is distinguishable from a hung one on every single poll, not just when it finally completes. Pass `verbose: true` to also get every `pending` segment listed, the raw `phaseDetail` event behind the phase string, and each active segment's full reconciled report text.",
   {
     sweepId: z.string().optional().describe("The sweep to check. Omit to list every known sweep instead."),
     verbose: z.boolean().optional().describe("Default false: segments array excludes still-pending segments, no report text. Set true to include pending segments too and each segment's full report text — the report file on disk already has all of it, so this is rarely needed."),
@@ -725,11 +725,12 @@ server.tool(
         segments: visibleSegments.map((s) => ({
           index: s.index,
           status: s.status,
+          phase: s.phase ?? null,
           fileCount: s.files.length,
           approxTokens: s.approxTokens,
           findingCount: s.findings?.length ?? 0,
           error: s.error,
-          ...(verbose ? { report: s.report } : {}),
+          ...(verbose ? { report: s.report, phaseDetail: s.phaseDetail ?? null } : {}),
         })),
       });
     } catch (e) {

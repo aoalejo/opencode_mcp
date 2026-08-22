@@ -343,6 +343,27 @@ function readSegmentContent(dir, files, budgetTokens) {
 }
 
 /**
+ * Render one orchestrate.js progress event (see `onProgress` in
+ * runReadOnlyBatch/reduceSources/reconcileRecursive) into a short
+ * human-readable phase string for `entry.phase`.
+ */
+function describeProgress(evt) {
+  const roundSuffix = Number.isInteger(evt.round) && evt.round > 0 ? ` (adversarial round ${evt.round})` : "";
+  switch (evt.stage) {
+    case "participants":
+      return `Reviewing: ${evt.done}/${evt.total} participant(s) finished${roundSuffix}`;
+    case "aggregate-tree":
+      return `Aggregating${roundSuffix}: level ${evt.level}, ${evt.done}/${evt.total} group(s) done`;
+    case "aggregate-final":
+      return `Final aggregation${roundSuffix} (tree level ${evt.level})`;
+    case "round":
+      return evt.label ?? `round ${evt.round}`;
+    default:
+      return JSON.stringify(evt);
+  }
+}
+
+/**
  * Whole-project sweep: segment the repo, run the lens swarm over each segment
  * in turn, and accumulate confirmed findings into a ledger that is fed into
  * every later segment (so reviewers stop re-reporting known bugs and start
@@ -435,12 +456,36 @@ export async function runSweep(opts) {
       const entry = state.segments[seg.index];
       entry.status = "running";
       entry.startedAt = Date.now();
+      entry.phase = "starting";
+      entry.phaseDetail = null;
       persistSweep(state);
+      onUpdate?.(state);
 
       const content = readSegmentContent(cwd, seg.files, budgetTokens);
       const fileList = seg.files.map((f) => `- ${f.path}`).join("\n");
       const scopeLabel =
         `one sector of a larger codebase — segment ${seg.index + 1} of ${segments.length}. Your assigned sector is these files:\n${fileList}`;
+
+      // Fires at every meaningful sub-step inside a segment (participant N/M
+      // done, entering the adversarial round, aggregating tree level 2, ...),
+      // not just at segment start/end. Before this, a segment sat at
+      // `status: "running"` for its ENTIRE duration — from a few minutes to
+      // several hours — with zero indication of where it actually was,
+      // making a genuinely-progressing sweep indistinguishable from a hung
+      // one over any status poll. Persisted (cheap JSON) on every tick so
+      // opencode_sweep_status reflects it live; the (larger) markdown report
+      // is still only rewritten at segment boundaries.
+      const onProgress = (evt) => {
+        entry.phase = describeProgress(evt);
+        entry.phaseDetail = evt;
+        persistSweep(state);
+        onUpdate?.(state);
+        // Only log actual transitions (not every participant-progress tick)
+        // so stderr stays readable on a wide swarm.
+        if (evt.stage === "round" || evt.stage === "aggregate-final" || evt.done === 0) {
+          console.error(`[opencode-mcp] sweep ${state.sweepId} seg ${seg.index + 1}/${segments.length}: ${entry.phase}`);
+        }
+      };
 
       try {
         const { reconciliation } = await runLensSwarm({
@@ -453,6 +498,7 @@ export async function runSweep(opts) {
           groupSize,
           maxConcurrency,
           isCancelled: () => isSweepCancelled(state.sweepId),
+          onProgress,
           dir: cwd,
           model,
           variant,
