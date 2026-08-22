@@ -33,6 +33,8 @@ today.
 - `opencode_list_models` — list `provider/model` ids, optionally filtered by provider. Only needed when a job requires a model outside the tier map.
 - `opencode_model_info` — verbose metadata (cost, context window) for one model.
 - `opencode_audit` — fan N forced-read-only reviewers out over uncommitted changes (or a commit range), confidence-ranked and adversarially re-checked. See "Multi-agent orchestration" below.
+- `opencode_sweep` — audit an ENTIRE codebase in path-coherent segments, feeding confirmed findings forward so later segments hunt new instances instead of re-reporting known ones. Long-running: returns a `sweepId`, poll it.
+- `opencode_sweep_status` — progress, the confirmed-findings ledger, and the path to the markdown report (rewritten after every segment).
 - `opencode_investigate` — same read-only fan-out/reconcile shape as `opencode_audit`, but for an arbitrary question instead of a diff.
 - `opencode_goal` — sequential passes toward a goal, with real lint/test output fed to each next pass, verified read-only at the end.
 - `opencode_job` — runs `opencode_goal` then `opencode_audit` on whatever it produced, and hands both results back untouched.
@@ -352,6 +354,52 @@ agent isn't a primary one — found this the hard way while testing.
 Verify it registered with `opencode agent list` — it should show
 `mcp-readonly (primary)`.
 
+### QA lenses (`src/lenses.js`)
+
+Reviewers don't get a vague theme ("look for correctness bugs"), they get one
+narrow, mechanically checkable instruction. That distinction matters more than
+it sounds: asked for "correctness bugs", a weak local model returns a wall of
+plausible prose restating the diff; asked to *"check the EXACT operator against
+what the comment says the boundary should be, and trace what happens when the
+value is exactly at the boundary"*, it does real work. Narrow lenses also make
+N parallel reviewers genuinely diverge instead of producing N near-duplicates.
+
+Six core lenses run by default:
+
+| key | hunts for |
+| --- | --- |
+| `sign_direction` | gain/loss, credit/debit, from/to swapped or inverted against the documented convention |
+| `boundary_offbyone` | `<` vs `<=`, exactly-at-the-boundary cases, loop/slice/pagination arithmetic, inclusive vs exclusive ranges |
+| `mutation_ordering` | index-based removal inside a loop, mutation during iteration, symmetric paths handled inconsistently |
+| `priority_ordering` | "best match" loops that are actually greedy/local, tie-breaks that silently pick wrong, shadowed rule chains |
+| `security` | auth bypass, missing ownership/permission checks, injection, credential leakage, unsafe defaults |
+| `performance` | N+1 access, unbounded work, blocking the hot path, repeated recomputation, never-invalidated caches |
+
+Six more are available via `lenses: "all"` or an explicit subset:
+`null_empty`, `error_handling`, `concurrency`, `contract_mismatch`,
+`state_consistency`, `test_gaps`.
+
+Every lens ends with the same reporting contract — file, location, what the
+code does vs should do, a **concrete failing scenario** (specific inputs →
+specific wrong output), and a severity — plus an explicit `NO FINDINGS`
+sentinel so "found nothing" is distinguishable from "rambled inconclusively".
+
+**Replicas, not a flat count.** `replicas` (default 2, hard minimum 2) gives
+*every* selected lens that many independent reviewers. This replaced spreading
+a flat participant count round-robin, where some lenses drew 3 reviewers and
+others 2 — so "2+ participants agreeing = CONFIRMED" silently meant different
+things depending on which lens you got. With uniform replicas, corroboration is
+measured against a known denominator. Total participants = lenses × replicas,
+clamped to `MAX_PARTICIPANTS`. The legacy `count` param still round-robins if
+you'd rather cap total spend than get even coverage.
+
+**Project context.** Every reviewer's prompt is prefixed with a domain/
+architecture file — `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, or
+`README.md`, auto-detected, or set explicitly via `contextFile`. A reviewer
+that doesn't know "distributions count as an expense in this ledger" reports
+confident nonsense; a paragraph of domain context removes a whole category of
+false positives.
+
 ### `opencode_audit` and `opencode_investigate`
 
 Both fan N participants out **in parallel**, all forced onto `mcp-readonly`
@@ -414,6 +462,111 @@ another goal pass on its own. Deciding what to do with what QA found (fix it,
 ignore it, ask the user) is explicitly the caller's job, not this tool's —
 matches this whole project's stance of surfacing information rather than
 silently resolving it on the caller's behalf.
+
+### `opencode_sweep` — auditing a whole codebase
+
+`opencode_audit` reviews a diff. `opencode_sweep` reviews an entire repository,
+which needs three things a diff review doesn't.
+
+**Segmentation.** The repo is split into token-budgeted segments (default ~40k
+tokens), packed **by path rather than by size** so a directory stays together.
+That's deliberate: bin-packing by size would scatter related files across
+segments and destroy exactly the findings that span them — a caller and callee
+disagreeing about a contract, two symmetric paths where only one was updated.
+A single file over budget gets its own segment rather than being cut
+mid-function.
+
+**A segment is a starting point, not a cage.** Reviewers get their sector's
+contents inlined, and are explicitly told to follow a flow into any other file
+in the repo when tracing it end-to-end is what the lens requires — they have
+read access to everything. Findings outside the assigned sector are reported
+and flagged as such.
+
+**A findings ledger that feeds forward.** After each segment, the reconciled
+report emits a compact machine-readable block that's parsed in plain JS into a
+running ledger. Every *later* segment gets that ledger with the instruction:
+don't re-report these, but do look for **other instances of the same bug
+class** — a confirmed pattern usually repeats. Refuted findings carry forward
+too, so a false positive dismissed in segment 3 isn't re-litigated in segment
+12. The ledger is capped at the most recent ~40 entries so it can't crowd out
+the prompt on a long run.
+
+**Always dry-run first.** `plan: true` spawns nothing and returns the file
+list, segment breakdown, and a job estimate:
+
+```
+opencode_sweep({ dir: "/path/to/repo", plan: true, lenses: "all", replicas: 4 })
+```
+
+Check `fileCount`, `segmentCount`, `estimatedJobs`, and the `skipped` counts
+before committing to a run — the estimate is how you find out a sweep would
+take six hours *before* it takes six hours.
+
+**File selection is language-agnostic and yours to override.** Defaults exclude
+vendor/build dirs, lockfiles, minified bundles, and generated-code patterns
+(`*.g.*`, `*.pb.*`, `*.generated.*`, `*.freezed.*`); files are additionally
+sniffed for `@generated` / "DO NOT EDIT" headers, which catches generated code
+in any language that globs would miss. Override with `sourceExtensions`,
+`includeGlobs`, and `excludeGlobs`.
+
+**It runs in the background.** A real sweep runs for an hour or more — far past
+any MCP client's request timeout — so `opencode_sweep` returns a `sweepId`
+immediately and `opencode_sweep_status` polls it. Full state is checkpointed to
+`~/.local/share/opencode-mcp/sweeps/<id>.json` and the markdown report at
+`<id>.md` is **rewritten after every segment**, so partial results are readable
+while it runs and survive the process dying. Segments run strictly sequentially
+— parallelising them would break the ledger's whole purpose.
+
+### Briefing another agent to run a sweep
+
+A prompt you can hand to another Claude Code session, verbatim, to have it
+sweep an unfamiliar project. It deliberately makes the agent choose the file
+filters itself rather than prescribing them — only the agent looking at the
+repo knows what's generated, vendored, or irrelevant in it.
+
+> You have an MCP server called `opencode` that can run a whole-codebase QA
+> audit using a swarm of read-only agents. Use it on this repository.
+>
+> **Step 1 — decide what to review.** Look at the repo layout first (top-level
+> dirs, the manifest/build file, any `.gitignore`). Then work out which files
+> are actually worth reviewing: application source, not generated code, not
+> vendored dependencies, not build output, not fixtures/snapshots, not
+> committed assets. Whatever this project's stack generates or vendors, exclude
+> it.
+>
+> **Step 2 — dry run.** Call `opencode_sweep` with `plan: true`, `lenses:
+> "all"`, `replicas: 4`, and your chosen `sourceExtensions` / `includeGlobs` /
+> `excludeGlobs`. It spawns nothing and returns the file list, the segment
+> breakdown, and a job estimate. Read the `skipped` counts and the segment
+> list: if something important was excluded, or something generated slipped
+> through, fix the filters and re-plan. Do not skip this step.
+>
+> **Step 3 — confirm scale before spending an hour.** Report the plan back to
+> me — file count, segment count, estimated jobs — and say roughly how long you
+> expect it to take, before starting the real run. If it looks unreasonable,
+> propose narrowing `includeGlobs` to the most important area, or using
+> `maxSegments` to trial the first few segments.
+>
+> **Step 4 — run it.** Call `opencode_sweep` again without `plan`, same
+> arguments. It returns a `sweepId` immediately and runs in the background;
+> there is NO notification when it finishes. Poll `opencode_sweep_status` with
+> that `sweepId` periodically. The `reportPath` it returns points at a markdown
+> report that is rewritten after every segment, so it's readable while the
+> sweep is still going.
+>
+> **Step 5 — report back.** When `status` is `completed`, read the report file
+> and summarise: the confirmed findings grouped by severity, which are worth
+> acting on now, and which look like false positives to you. Do NOT fix
+> anything yet — verify each high-severity finding against the real code
+> yourself first and tell me which ones you actually believe, because a
+> swarm of small models produces some confident nonsense and the point of your
+> pass is to catch it.
+>
+> Notes: `replicas: 4` means every one of the 12 lenses gets 4 independent
+> reviewers per segment — that's the redundancy that makes the confidence
+> ranking meaningful, and it's why the job estimate is large. `depth: 1` (the
+> default) adds one adversarial round per segment that tries to refute
+> single-source findings.
 
 ### Try it yourself
 

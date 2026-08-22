@@ -1,8 +1,9 @@
 import { execFileSync, execSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { startJob, getJob, waitForJob, jobSummary } from "./jobs.js";
 import { resolveModel, pinnedModel } from "./tiers.js";
+import { ALL_LENS_KEYS, FINDING_FORMAT, resolveLenses, planParticipants } from "./lenses.js";
 
 // Registered once in ~/.config/opencode/opencode.jsonc: permission.edit/bash/
 // task/skill all "deny" — a genuine forced-read-only agent (not just a
@@ -22,19 +23,173 @@ const HANDOFF_SUFFIX =
   "\n\n---\nRespond with only your findings/answer — no preamble, no restating " +
   "the task, no narrating tool use.";
 
-// Cycled through so N parallel read-only reviewers of the SAME diff under the
-// SAME (often deterministic, pinned-local) model actually diverge instead of
-// producing near-duplicate output — see "Perspective-diverse verify" pattern.
-export const REVIEW_LENSES = [
-  "correctness bugs — logic errors, off-by-one mistakes, wrong conditionals, mishandled edge cases",
-  "security — injection, unsafe deserialization, leaked secrets, unsafe defaults, missing auth/validation checks",
-  "simplification & reuse — unneeded abstraction, duplicated logic, code that should reuse an existing helper",
-  "efficiency — wasted work, N+1 patterns, redundant recomputation, unnecessary blocking calls",
-  "test coverage — missing or weak tests for the new/changed behavior, untested edge cases",
-  "consistency — deviations from the surrounding codebase's existing conventions and style",
-  "error handling — swallowed errors, missing validation at real boundaries, misleading failure modes",
-  "readability & naming — confusing names or structure a future reader would trip on",
-];
+// Files checked, in order, for repo-wide context to hand every reviewer
+// (architecture, domain conventions, invariants). A weak model reviewing a
+// financial ledger without knowing "distributions count as an expense here"
+// reports confident nonsense; a paragraph of domain context prevents a whole
+// category of false positives.
+const CONTEXT_FILE_CANDIDATES = ["AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md", "README.md"];
+const CONTEXT_MAX_CHARS = 12000;
+
+/**
+ * Load repo-wide context to prepend to every reviewer's prompt. An explicit
+ * `contextFile` wins; otherwise the first of CONTEXT_FILE_CANDIDATES that
+ * exists is used. Returns null when there's nothing to add (never throws —
+ * missing context degrades review quality, it shouldn't fail the run).
+ */
+export function loadProjectContext({ dir, contextFile }) {
+  const base = dir || process.cwd();
+  const candidates = contextFile ? [contextFile] : CONTEXT_FILE_CANDIDATES;
+  for (const name of candidates) {
+    const full = path.isAbsolute(name) ? name : path.join(base, name);
+    try {
+      if (!existsSync(full)) continue;
+      const raw = readFileSync(full, "utf8");
+      if (!raw.trim()) continue;
+      const truncated = raw.length > CONTEXT_MAX_CHARS;
+      return {
+        path: full,
+        text: truncated ? `${raw.slice(0, CONTEXT_MAX_CHARS)}\n\n[...truncated for length...]` : raw,
+        truncated,
+      };
+    } catch {
+      // unreadable candidate — try the next one
+    }
+  }
+  return null;
+}
+
+/**
+ * Compact one-liners for findings already confirmed earlier in a sweep, so
+ * later segments don't burn their whole review re-reporting the same bug.
+ * Deliberately tells reviewers to hunt for SIMILAR instances rather than to
+ * ignore the area entirely — a confirmed bug class is a lead, not a no-go.
+ */
+function formatKnownFindings(knownFindings, refutedFindings, cap = 40) {
+  const confirmed = (knownFindings || []).filter(Boolean);
+  const refuted = (refutedFindings || []).filter(Boolean);
+  if (!confirmed.length && !refuted.length) return null;
+
+  const sections = [];
+  if (confirmed.length) {
+    const shown = confirmed.slice(-cap);
+    const omitted = confirmed.length - shown.length;
+    sections.push(
+      `ALREADY-CONFIRMED FINDINGS (reported and verified earlier in this run — do NOT re-report them):\n` +
+        shown.map((f) => `- [${f.lens ?? "?"}] ${f.location ?? "?"} — ${f.title ?? ""}`.trim()).join("\n") +
+        (omitted > 0 ? `\n- ...and ${omitted} earlier finding(s) omitted for length.` : "")
+    );
+  }
+  if (refuted.length) {
+    const shown = refuted.slice(-cap);
+    const omitted = refuted.length - shown.length;
+    sections.push(
+      `ALREADY-REFUTED CLAIMS (raised earlier in this run and then DISPROVEN under adversarial review — ` +
+        `do not raise them again unless you have new evidence the earlier refutation missed):\n` +
+        shown.map((f) => `- [${f.lens ?? "?"}] ${f.location ?? "?"} — ${f.title ?? ""}`.trim()).join("\n") +
+        (omitted > 0 ? `\n- ...and ${omitted} earlier refuted claim(s) omitted for length.` : "")
+    );
+  }
+  sections.push(
+    `Do not spend effort re-confirming or re-litigating anything above. DO actively look for OTHER, DISTINCT ` +
+      `instances of the same bug classes elsewhere in the code you are reviewing now — a confirmed bug pattern ` +
+      `usually repeats. Report only new occurrences at new locations.`
+  );
+  return sections.join("\n\n");
+}
+
+/**
+ * Instruction appended to the FINAL aggregator so it emits, after its prose
+ * report, a compact machine-readable list of confirmed findings. Parsed in
+ * plain JS (see parseFindingsBlock) rather than by another LLM call — one
+ * less thing to go wrong, and it degrades to "carry nothing forward" instead
+ * of failing if the model ignores the format.
+ */
+const FINDINGS_BLOCK_INSTRUCTION = `
+
+Finally, AFTER the prose report, output one fenced block in exactly this format (a program parses it, so keep the format exact):
+
+\`\`\`findings
+[lens_key] path/to/file.ext:location | severity | one-line title
+\`\`\`
+
+One line per CONFIRMED or ADVERSARIALLY CONFIRMED finding only — never low-confidence, never refuted ones. Severity must be high, medium, or low. If there are no confirmed findings, output the fenced block empty.
+
+Then, if any claim was REFUTED (raised by a reviewer and then convincingly disproven), output a second fenced block in the same shape listing those instead, so later reviewers don't raise them again:
+
+\`\`\`refuted
+[lens_key] path/to/file.ext:location | why it was refuted
+\`\`\`
+
+Omit this second block entirely if nothing was refuted.`;
+
+/**
+ * Parse the compact findings block emitted per FINDINGS_BLOCK_INSTRUCTION.
+ * Returns [] if absent/unparseable.
+ *
+ * Deliberately lenient about the lens field: models routinely drop the square
+ * brackets (observed on the very first real sweep — every finding was
+ * correctly identified and then thrown away by a stricter regex). Anchoring
+ * on the pipe-separated fields and treating the brackets as optional keeps a
+ * good answer from being lost to a formatting slip.
+ */
+function parseTaggedBlock(text, blockName, { hasSeverity }) {
+  if (!text) return [];
+  const block = text.match(new RegExp("```" + blockName + "\\s*([\\s\\S]*?)```"));
+  if (!block) return [];
+  const minFields = hasSeverity ? 3 : 2;
+  return block[1]
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const parts = line.split("|").map((s) => s.trim());
+      if (parts.length < minFields) return null;
+      const head = parts[0].replace(/^[-*]\s*/, "").trim();
+      if (!head || /^path\/to\//i.test(head)) return null; // the format template echoed back
+
+      let lens = null;
+      let location = head;
+      const bracketed = head.match(/^\[([^\]]+)\]\s*(.*)$/);
+      if (bracketed) {
+        lens = bracketed[1].trim();
+        location = bracketed[2].trim();
+      } else {
+        // Unbracketed. The leading token may be one lens key, or several
+        // comma-joined ones when a finding was corroborated across lenses.
+        const spaced = head.match(/^(\S+)\s+(.+)$/);
+        if (spaced) {
+          const keys = spaced[1].split(",").map((k) => k.trim()).filter(Boolean);
+          if (keys.length && keys.every((k) => ALL_LENS_KEYS.includes(k))) {
+            lens = keys.join(",");
+            location = spaced[2].trim();
+          }
+        }
+      }
+      if (!location) return null;
+
+      if (!hasSeverity) {
+        return { lens: lens ?? "unspecified", location, title: parts.slice(1).join(" | ").trim() };
+      }
+      const severity = parts[1].toLowerCase();
+      return {
+        lens: lens ?? "unspecified",
+        location,
+        severity: ["high", "medium", "low"].includes(severity) ? severity : "medium",
+        title: parts.slice(2).join(" | ").trim(),
+      };
+    })
+    .filter(Boolean);
+}
+
+export function parseFindingsBlock(text) {
+  return parseTaggedBlock(text, "findings", { hasSeverity: true });
+}
+
+/** Claims raised and then disproven — carried forward so later segments don't re-litigate them. */
+export function parseRefutedBlock(text) {
+  return parseTaggedBlock(text, "refuted", { hasSeverity: false });
+}
 
 function git(dir, args, maxBuffer = 20 * 1024 * 1024) {
   return execFileSync("git", args, { cwd: dir || process.cwd(), maxBuffer }).toString("utf8");
@@ -229,9 +384,12 @@ async function aggregate({ instructions, sources, dir, model, variant, tier, wai
  * Returns { report (final markdown/text), depth, rounds (per-stage job
  * metadata for debugging), finalJob }.
  */
-async function reconcileRecursive({ participants, context, depth, count, dir, model, variant, tier, waitMs }) {
+async function reconcileRecursive({ participants, context, depth, count, dir, model, variant, tier, waitMs, emitFindingsBlock = false }) {
   const depthVal = clampDepth(depth);
   const rounds = [];
+  // Only the LAST aggregation emits the machine-readable block — asking every
+  // round for it would just be parsed and thrown away until the final one.
+  const blockIf = (isFinal) => (emitFindingsBlock && isFinal ? FINDINGS_BLOCK_INSTRUCTION : "");
 
   let report = await aggregate({
     instructions:
@@ -239,7 +397,8 @@ async function reconcileRecursive({ participants, context, depth, count, dir, mo
       `Below are ${participants.length} independent participants' findings. Build ONE unified report: merge ` +
       `overlapping findings, and for EACH finding explicitly note how many of the ${participants.length} ` +
       `participants raised it. Treat anything raised by only 1 participant as LOW CONFIDENCE and label it as such; ` +
-      `anything raised by 2 or more is CONFIRMED. Drop anything that's clearly not a real issue. Rank by severity.`,
+      `anything raised by 2 or more is CONFIRMED. Drop anything that's clearly not a real issue. Rank by severity.` +
+      blockIf(depthVal === 0),
     sources: participants.map((p, i) => ({ label: `Participant ${i + 1}${p.lens ? ` (lens: ${p.lens})` : ""}`, text: p.text, status: p.status, errorMessage: p.errorMessage })),
     dir,
     model,
@@ -282,7 +441,8 @@ async function reconcileRecursive({ participants, context, depth, count, dir, mo
         `unified report: promote any low-confidence finding that survived adversarial scrutiny (label it ` +
         `"adversarially confirmed", noting it started single-source but held up), call out and separately list ` +
         `anything the adversaries convincingly refuted (never silently delete it — keep it visible for transparency), ` +
-        `and keep everything already confirmed as-is. ${context}`,
+        `and keep everything already confirmed as-is. ${context}` +
+        blockIf(round === depthVal),
       sources: [
         { label: "Previous report", text: report.text, status: report.status },
         ...adversaries.map((a, i) => ({ label: `Adversarial reviewer ${i + 1}`, text: a.text, status: a.status, errorMessage: a.errorMessage })),
@@ -302,64 +462,214 @@ async function reconcileRecursive({ participants, context, depth, count, dir, mo
     report = reaggregated;
   }
 
-  return { report: report.text, depth: depthVal, rounds, finalJob: { status: report.status, tokens: report.tokens, cost: report.cost } };
+  return {
+    report: report.text,
+    findings: emitFindingsBlock ? parseFindingsBlock(report.text) : [],
+    refuted: emitFindingsBlock ? parseRefutedBlock(report.text) : [],
+    depth: depthVal,
+    rounds,
+    finalJob: { status: report.status, tokens: report.tokens, cost: report.cost },
+  };
 }
 
 /**
- * `audit`: N forced-read-only reviewers, each assigned a rotating lens (see
- * REVIEW_LENSES), all looking at the same diff — uncommitted changes by
- * default, or everything since `baseCommit` when given (reviewing a whole
- * branch/PR rather than just what's currently uncommitted). When the diff is
- * too large (~100k+ tokens) to hand every participant in full, participants
- * instead each review a distinct subset of the changed files independently.
- * Confidence-ranked, adversarially-verified reconciliation (see
- * reconcileRecursive) replaces a single naive synthesis pass.
+ * The shared engine behind `audit` and each `sweep` segment: assign lenses to
+ * participants, fan them out read-only in parallel over one body of code,
+ * then run confidence-ranked adversarial reconciliation over their findings.
+ *
+ * `contentSection` is whatever the reviewers should look at (a diff, or a set
+ * of file contents). `scopeLabel` names it in prose. Everything else —
+ * project context, already-known findings, lens assignment — is layered on
+ * identically for both callers so the two paths can't drift apart.
  */
-export async function runAudit({ count, dir, model, variant, tier, waitMs, focus, depth = 1, baseCommit, verbose = false }) {
-  const n = clampCount(count, defaultWidth({ model, tier }, 24, 16));
+async function runLensSwarm({
+  scopeLabel,
+  contentSection,
+  contentSummaryForAggregator,
+  lenses,
+  replicas,
+  count,
+  depth,
+  dir,
+  model,
+  variant,
+  tier,
+  waitMs,
+  focus,
+  projectContext,
+  knownFindings,
+  refutedFindings,
+  titlePrefix,
+  emitFindingsBlock = false,
+  roamHint,
+}) {
+  const plan = planParticipants({ lenses, replicas, count, maxParticipants: MAX_PARTICIPANTS });
+  const { assignments } = plan;
+  const contextBlock = projectContext
+    ? `PROJECT CONTEXT (from ${path.basename(projectContext.path)}) — use this to understand the domain's conventions and invariants before judging anything:\n\n${projectContext.text}\n\n---\n\n`
+    : "";
+  const knownBlock = formatKnownFindings(knownFindings, refutedFindings);
+
+  const buildPrompt = (i) => {
+    const { lens, nth, totalForLens } = assignments[i];
+    const dupNudge =
+      totalForLens > 1
+        ? `\n\nYou are reviewer ${nth} of ${totalForLens} independently assigned to this same lens. Work the lens your own way; do not assume the others will cover any particular part of it. If several angles are possible, favour one the others are less likely to take.`
+        : "";
+    return (
+      `${contextBlock}` +
+      `You are performing a focused QA review of ${scopeLabel}.\n\n` +
+      `YOUR LENS — review ONLY through this lens, ignore everything else:\n${lens.prompt}${dupNudge}\n\n` +
+      `${focus ? `ADDITIONAL FOCUS FROM THE REQUESTER: ${focus}\n\n` : ""}` +
+      `${knownBlock ? `${knownBlock}\n\n` : ""}` +
+      `${contentSection}\n\n` +
+      `${roamHint ?? "You have read-only access to the whole repository — use read/grep/glob/list freely to follow a flow across other files, check a caller, or confirm a convention. You cannot edit anything."}\n` +
+      `${FINDING_FORMAT}`
+    );
+  };
+
+  const raw = await runReadOnlyBatch({
+    count: assignments.length,
+    buildPrompt,
+    dir,
+    model,
+    variant,
+    tier,
+    waitMs,
+    titlePrefix,
+  });
+  const participants = raw.map((p, i) => ({ ...p, lens: assignments[i].lens.key, lensTitle: assignments[i].lens.title }));
+
+  const lensSummary = [...new Set(assignments.map((a) => a.lens.key))].join(", ");
+  const context =
+    `${assignments.length} independent read-only reviewers examined ${scopeLabel}, split across these QA lenses ` +
+    `(${lensSummary}) with ${plan.replicas ?? "a round-robin"} reviewer(s) per lens.\n\n${contentSummaryForAggregator ?? ""}`;
+
+  const reconciliation = await reconcileRecursive({
+    participants,
+    context,
+    depth,
+    count: assignments.length,
+    dir,
+    model,
+    variant,
+    tier,
+    waitMs,
+    emitFindingsBlock,
+  });
+
+  return { participants, reconciliation, plan };
+}
+
+/**
+ * `audit`: forced-read-only reviewers, each assigned a QA lens (see
+ * lenses.js), all looking at the same diff — uncommitted changes by default,
+ * or everything since `baseCommit` when given (reviewing a whole branch/PR
+ * rather than just what's currently uncommitted). When the diff is too large
+ * (~100k+ tokens) to hand every participant in full, participants instead
+ * each review a distinct subset of the changed files. Confidence-ranked,
+ * adversarially-verified reconciliation (see reconcileRecursive) replaces a
+ * single naive synthesis pass.
+ */
+export async function runAudit({
+  count,
+  replicas,
+  lenses: lensSelection,
+  dir,
+  model,
+  variant,
+  tier,
+  waitMs,
+  focus,
+  depth = 1,
+  baseCommit,
+  contextFile,
+  knownFindings,
+  verbose = false,
+}) {
   const { diff, status, files, mode, base } = getDiff({ dir, baseCommit });
   if (!diff.trim() && !status.trim()) {
     return { participants: [], reconciliation: null, message: "No changes found — nothing to audit.", diff: "", status: "" };
   }
 
+  const { lenses, unknown } = resolveLenses(lensSelection);
+  const projectContext = loadProjectContext({ dir, contextFile });
   const approxTokens = Math.ceil(diff.length / 4);
-  const perFileMode = approxTokens > LARGE_DIFF_TOKEN_THRESHOLD && files.length > 1;
+  const scopeLabel =
+    mode === "commit" ? `the changes from commit ${base} through HEAD in this git repository` : `the UNCOMMITTED changes (working tree vs HEAD) in this git repository`;
 
-  const buildPrompt = (i, total) => {
-    const lens = REVIEW_LENSES[i % REVIEW_LENSES.length];
-    const scopeLabel = mode === "commit" ? `changes from commit ${base} through HEAD` : "UNCOMMITTED code changes (working tree vs HEAD)";
-    let diffSection;
-    if (perFileMode) {
-      const assigned = files.filter((_, idx) => idx % total === i);
-      const partial = getDiffForFiles({ dir, baseCommit, files: assigned });
-      diffSection =
-        `This diff is large (~${approxTokens} tokens across ${files.length} files) — you've been assigned a subset ` +
-        `to review independently: ${assigned.join(", ") || "(none assigned — say so and stop)"}\n\n` +
-        `\`git diff\` for your assigned files:\n${partial || "(no changes in your assigned files)"}`;
-    } else {
-      diffSection = `\`git status --porcelain\`:\n${status || "(n/a — commit-range mode)"}\n\n\`git diff\`:\n${diff}`;
+  // Oversized diffs can't be inlined for every participant. Note that this
+  // does NOT partition files across participants any more: under the replica
+  // model, reviewers sharing a lens must see identical content or their
+  // agreement stops meaning anything. Instead every participant gets the same
+  // bounded prefix plus the paths of what was left out — they have read access
+  // and are told to open those themselves. For a genuinely repo-scale review,
+  // opencode_sweep segments properly instead of truncating.
+  let contentSection;
+  let truncatedFiles = [];
+  if (approxTokens > LARGE_DIFF_TOKEN_THRESHOLD && files.length > 1) {
+    const budgetChars = LARGE_DIFF_TOKEN_THRESHOLD * 4;
+    const included = [];
+    let used = 0;
+    for (const f of files) {
+      const d = getDiffForFiles({ dir, baseCommit, files: [f] });
+      if (used + d.length > budgetChars && included.length) break;
+      included.push({ file: f, diff: d });
+      used += d.length;
     }
-    return (
-      `You are reviewing ${scopeLabel} in a git repository. Focus specifically on this lens: ${lens}.` +
-      `${focus ? ` Additional focus from the requester: ${focus}.` : ""}\n\n${diffSection}\n\n` +
-      `You may use read/grep/glob/list to inspect surrounding files in the repo for context. ` +
-      `You cannot edit anything (read-only) — report findings only, most important first. If you find nothing for your lens, say so briefly.`
-    );
+    truncatedFiles = files.filter((f) => !included.some((i) => i.file === f));
+    contentSection =
+      `This change is large (~${approxTokens} tokens across ${files.length} files) — too big to inline in full.\n\n` +
+      `\`git status --porcelain\`:\n${status || "(n/a — commit-range mode)"}\n\n` +
+      `Diffs for the first ${included.length} changed file(s):\n${included.map((i) => i.diff).join("\n")}\n\n` +
+      `${truncatedFiles.length ? `NOT inlined (open them yourself with your read tool if your lens needs them):\n${truncatedFiles.map((f) => `- ${f}`).join("\n")}` : ""}`;
+  } else {
+    contentSection = `\`git status --porcelain\`:\n${status || "(n/a — commit-range mode)"}\n\n\`git diff\`:\n${diff}`;
+  }
+
+  const { participants, reconciliation, plan } = await runLensSwarm({
+    scopeLabel,
+    contentSection,
+    contentSummaryForAggregator:
+      approxTokens > LARGE_DIFF_TOKEN_THRESHOLD
+        ? `The reviewed change spans ${files.length} files (~${approxTokens} tokens) and was too large to inline here in full.`
+        : `\`git diff\` under review:\n${diff}`,
+    lenses,
+    replicas,
+    count,
+    depth,
+    dir,
+    model,
+    variant,
+    tier,
+    waitMs,
+    focus,
+    projectContext,
+    knownFindings,
+    titlePrefix: "mcp-audit",
+    emitFindingsBlock: true,
+  });
+
+  return {
+    participantCount: participants.length,
+    lensesUsed: lenses.map((l) => l.key),
+    unknownLenses: unknown,
+    replicas: plan.replicas,
+    planNotes: plan.notes,
+    projectContextFile: projectContext?.path ?? null,
+    participants: participants.map((p) => ({ index: p.index, lens: p.lens, ...trimJob(p, { keepText: verbose }) })),
+    reconciliation,
+    diffStat: status,
+    approxDiffTokens: approxTokens,
+    truncatedFiles,
+    mode,
+    baseCommit: base,
+    filesReviewed: files,
   };
-
-  const participants = (
-    await runReadOnlyBatch({ count: n, buildPrompt, dir, model, variant, tier, waitMs, titlePrefix: "mcp-audit" })
-  ).map((p, i) => ({ ...p, lens: REVIEW_LENSES[i % REVIEW_LENSES.length] }));
-
-  const context = perFileMode
-    ? `${n} independent read-only reviewers each audited a distinct subset of a large diff (${mode === "commit" ? `commit ${base} through HEAD` : "uncommitted changes"}, ~${approxTokens} tokens total, split by file since it was too large to share in full). Changed files: ${files.join(", ")}`
-    : `${n} independent read-only reviewers audited the same diff (${mode === "commit" ? `commit ${base} through HEAD` : "uncommitted changes"}) from different lenses.\n\n\`git diff\`:\n${diff}`;
-
-  const reconciliation = await reconcileRecursive({ participants, context, depth, count: n, dir, model, variant, tier, waitMs });
-  const participantsForReturn = participants.map((p) => ({ index: p.index, lens: p.lens, ...trimJob(p, { keepText: verbose }) }));
-
-  return { participantCount: n, participants: participantsForReturn, reconciliation, diffStat: status, mode, baseCommit: base, filesReviewed: files, perFileMode };
 }
+
+/** Exposed for sweep.js — one segment of a whole-project sweep is just a lens swarm over file contents. */
+export { runLensSwarm };
 
 /**
  * `investigate`: same fan-out/reconcile shape as audit, but driven by an

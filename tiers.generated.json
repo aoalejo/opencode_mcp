@@ -3,9 +3,9 @@
     "low": {
       "model": "opencode-go/deepseek-v4-flash",
       "variant": "high",
-      "label": "low — opencode-go/deepseek-v4-flash (arena #11, score 1581, $0.22/$0.66 per M tokens)",
-      "arenaScore": 1581,
-      "arenaRank": 11,
+      "label": "low — opencode-go/deepseek-v4-flash (arena #12, score 1578, $0.22/$0.66 per M tokens)",
+      "arenaScore": 1578,
+      "arenaRank": 12,
       "cost": {
         "input": 0.22,
         "output": 0.66,
@@ -20,9 +20,9 @@
     "mid": {
       "model": "opencode-go/deepseek-v4-flash",
       "variant": "high",
-      "label": "mid — opencode-go/deepseek-v4-flash (arena #11, score 1581, $0.22/$0.66 per M tokens)",
-      "arenaScore": 1581,
-      "arenaRank": 11,
+      "label": "mid — opencode-go/deepseek-v4-flash (arena #12, score 1578, $0.22/$0.66 per M tokens)",
+      "arenaScore": 1578,
+      "arenaRank": 12,
       "cost": {
         "input": 0.22,
         "output": 0.66,
@@ -35,27 +35,27 @@
       "inheritedFrom": "low"
     },
     "high": {
-      "model": "opencode-go/deepseek-v4-flash",
-      "variant": "high",
-      "label": "high — opencode-go/deepseek-v4-flash (arena #11, score 1581, $0.22/$0.66 per M tokens)",
-      "arenaScore": 1581,
+      "model": "opencode-go/glm-5.2",
+      "variant": "max",
+      "label": "high — opencode-go/glm-5.2 (arena #11, score 1582, $1.4/$4.4 per M tokens)",
+      "arenaScore": 1582,
       "arenaRank": 11,
       "cost": {
-        "input": 0.22,
-        "output": 0.66,
+        "input": 1.4,
+        "output": 4.4,
         "cache": {
-          "read": 0.007,
+          "read": 0.26,
           "write": 0
         }
       },
-      "inherited": true,
-      "inheritedFrom": "low"
+      "inherited": false,
+      "inheritedFrom": null
     },
     "max": {
       "model": "opencode-go/qwen3.8-max",
       "variant": null,
-      "label": "max — opencode-go/qwen3.8-max (arena #3, score 1667, $2/$6 per M tokens)",
-      "arenaScore": 1667,
+      "label": "max — opencode-go/qwen3.8-max (arena #3, score 1669, $2/$6 per M tokens)",
+      "arenaScore": 1669,
       "arenaRank": 3,
       "cost": {
         "input": 2,
@@ -83,24 +83,24 @@
           }
         },
         "contextWindow": 1000000,
-        "arenaScore": 1581,
-        "arenaRank": 11,
+        "arenaScore": 1578,
+        "arenaRank": 12,
         "arenaSlug": "deepseek-v4-flash-high"
       },
       {
         "model": "opencode-go/hy3",
         "variant": null,
         "cost": {
-          "input": 0.14,
-          "output": 0.58,
+          "input": 0.0175,
+          "output": 0.0725,
           "cache": {
-            "read": 0.035,
+            "read": 0.004375,
             "write": 0
           }
         },
         "contextWindow": 256000,
-        "arenaScore": 1522,
-        "arenaRank": 24,
+        "arenaScore": 1517,
+        "arenaRank": 27,
         "arenaSlug": "hy3"
       },
       {
@@ -138,7 +138,7 @@
         },
         "contextWindow": 1050000,
         "arenaScore": 1517,
-        "arenaRank": 28,
+        "arenaRank": 29,
         "arenaSlug": "gpt-5.6-luna-xhigh (codex-harness)"
       },
       {
@@ -154,7 +154,7 @@
         },
         "contextWindow": 1000000,
         "arenaScore": 1438,
-        "arenaRank": 50,
+        "arenaRank": 51,
         "arenaSlug": "mimo-v2.5"
       }
     ],
@@ -171,24 +171,24 @@
           }
         },
         "contextWindow": 1000000,
-        "arenaScore": 1581,
-        "arenaRank": 11,
+        "arenaScore": 1578,
+        "arenaRank": 12,
         "arenaSlug": "deepseek-v4-flash-high"
       },
       {
         "model": "opencode-go/hy3",
         "variant": null,
         "cost": {
-          "input": 0.14,
-          "output": 0.58,
+          "input": 0.0175,
+          "output": 0.0725,
           "cache": {
-            "read": 0.035,
+            "read": 0.004375,
             "write": 0
           }
         },
         "contextWindow": 256000,
-        "arenaScore": 1522,
-        "arenaRank": 24,
+        "arenaScore": 1517,
+        "arenaRank": 27,
         "arenaSlug": "hy3"
       },
       {
@@ -226,7 +226,7 @@
         },
         "contextWindow": 1050000,
         "arenaScore": 1517,
-        "arenaRank": 28,
+        "arenaRank": 29,
         "arenaSlug": "gpt-5.6-luna-xhigh (codex-harness)"
       },
       {
@@ -263,8 +263,8 @@
           }
         },
         "contextWindow": 1000000,
-        "arenaScore": 1490,
-        "arenaRank": 34,
+        "arenaScore": 1489,
+        "arenaRank": 36,
         "arenaSlug": "minimax-m3"
       },
       {
@@ -279,8 +279,8 @@
           }
         },
         "contextWindow": 1048576,
-        "arenaScore": 1474,
-        "arenaRank": 38,
+        "arenaScore": 1476,
+        "arenaRank": 39,
         "arenaSlug": "mimo-v2.5-pro"
       },
       {
@@ -318,7 +318,7 @@
         },
         "contextWindow": 1000000,
         "arenaScore": 1460,
-        "arenaRank": 43,
+        "arenaRank": 44,
         "arenaSlug": "qwen3.6-plus"
       },
       {
@@ -334,7 +334,7 @@
         },
         "contextWindow": 1000000,
         "arenaScore": 1438,
-        "arenaRank": 50,
+        "arenaRank": 51,
         "arenaSlug": "mimo-v2.5"
       },
       {
@@ -349,28 +349,12 @@
           }
         },
         "contextWindow": 204800,
-        "arenaScore": 1397,
-        "arenaRank": 65,
+        "arenaScore": 1398,
+        "arenaRank": 66,
         "arenaSlug": "minimax-m2.7"
       }
     ],
     "high": [
-      {
-        "model": "opencode-go/deepseek-v4-flash",
-        "variant": "high",
-        "cost": {
-          "input": 0.22,
-          "output": 0.66,
-          "cache": {
-            "read": 0.007,
-            "write": 0
-          }
-        },
-        "contextWindow": 1000000,
-        "arenaScore": 1581,
-        "arenaRank": 11,
-        "arenaSlug": "deepseek-v4-flash-high"
-      },
       {
         "model": "opencode-go/glm-5.2",
         "variant": "max",
@@ -383,24 +367,56 @@
           }
         },
         "contextWindow": 1000000,
-        "arenaScore": 1585,
-        "arenaRank": 9,
+        "arenaScore": 1582,
+        "arenaRank": 11,
         "arenaSlug": "glm-5.2-max"
+      },
+      {
+        "model": "opencode-go/glm-5.3",
+        "variant": "max",
+        "cost": {
+          "input": 1.4,
+          "output": 4.4,
+          "cache": {
+            "read": 0.26,
+            "write": 0
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1597,
+        "arenaRank": 8,
+        "arenaSlug": "glm-5.3-max"
+      },
+      {
+        "model": "opencode-go/deepseek-v4-flash",
+        "variant": "high",
+        "cost": {
+          "input": 0.22,
+          "output": 0.66,
+          "cache": {
+            "read": 0.007,
+            "write": 0
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1578,
+        "arenaRank": 12,
+        "arenaSlug": "deepseek-v4-flash-high"
       },
       {
         "model": "opencode-go/hy3",
         "variant": null,
         "cost": {
-          "input": 0.14,
-          "output": 0.58,
+          "input": 0.0175,
+          "output": 0.0725,
           "cache": {
-            "read": 0.035,
+            "read": 0.004375,
             "write": 0
           }
         },
         "contextWindow": 256000,
-        "arenaScore": 1522,
-        "arenaRank": 24,
+        "arenaScore": 1517,
+        "arenaRank": 27,
         "arenaSlug": "hy3"
       },
       {
@@ -438,7 +454,7 @@
         },
         "contextWindow": 1050000,
         "arenaScore": 1517,
-        "arenaRank": 28,
+        "arenaRank": 29,
         "arenaSlug": "gpt-5.6-luna-xhigh (codex-harness)"
       },
       {
@@ -454,7 +470,7 @@
         },
         "contextWindow": 202752,
         "arenaScore": 1510,
-        "arenaRank": 29,
+        "arenaRank": 30,
         "arenaSlug": "glm-5.1"
       },
       {
@@ -470,7 +486,7 @@
         },
         "contextWindow": 262144,
         "arenaScore": 1509,
-        "arenaRank": 30,
+        "arenaRank": 31,
         "arenaSlug": "kimi-k2.6"
       },
       {
@@ -507,8 +523,8 @@
           }
         },
         "contextWindow": 1000000,
-        "arenaScore": 1490,
-        "arenaRank": 34,
+        "arenaScore": 1489,
+        "arenaRank": 36,
         "arenaSlug": "minimax-m3"
       },
       {
@@ -523,8 +539,8 @@
           }
         },
         "contextWindow": 1048576,
-        "arenaScore": 1474,
-        "arenaRank": 38,
+        "arenaScore": 1476,
+        "arenaRank": 39,
         "arenaSlug": "mimo-v2.5-pro"
       },
       {
@@ -540,7 +556,7 @@
         },
         "contextWindow": 262144,
         "arenaScore": 1473,
-        "arenaRank": 39,
+        "arenaRank": 40,
         "arenaSlug": "kimi-k2.7-code"
       },
       {
@@ -578,7 +594,7 @@
         },
         "contextWindow": 1000000,
         "arenaScore": 1460,
-        "arenaRank": 43,
+        "arenaRank": 44,
         "arenaSlug": "qwen3.6-plus"
       },
       {
@@ -594,7 +610,7 @@
         },
         "contextWindow": 1000000,
         "arenaScore": 1446,
-        "arenaRank": 47,
+        "arenaRank": 48,
         "arenaSlug": "deepseek-v4-pro"
       },
       {
@@ -610,7 +626,7 @@
         },
         "contextWindow": 1000000,
         "arenaScore": 1438,
-        "arenaRank": 50,
+        "arenaRank": 51,
         "arenaSlug": "mimo-v2.5"
       },
       {
@@ -625,8 +641,8 @@
           }
         },
         "contextWindow": 204800,
-        "arenaScore": 1397,
-        "arenaRank": 65,
+        "arenaScore": 1398,
+        "arenaRank": 66,
         "arenaSlug": "minimax-m2.7"
       }
     ],
@@ -643,7 +659,7 @@
           }
         },
         "contextWindow": 1000000,
-        "arenaScore": 1667,
+        "arenaScore": 1669,
         "arenaRank": 3,
         "arenaSlug": "qwen3.8-max"
       },
@@ -664,6 +680,22 @@
         "arenaSlug": "kimi-k3-max"
       },
       {
+        "model": "opencode-go/glm-5.3",
+        "variant": "max",
+        "cost": {
+          "input": 1.4,
+          "output": 4.4,
+          "cache": {
+            "read": 0.26,
+            "write": 0
+          }
+        },
+        "contextWindow": 1000000,
+        "arenaScore": 1597,
+        "arenaRank": 8,
+        "arenaSlug": "glm-5.3-max"
+      },
+      {
         "model": "opencode-go/glm-5.2",
         "variant": "max",
         "cost": {
@@ -675,8 +707,8 @@
           }
         },
         "contextWindow": 1000000,
-        "arenaScore": 1585,
-        "arenaRank": 9,
+        "arenaScore": 1582,
+        "arenaRank": 11,
         "arenaSlug": "glm-5.2-max"
       },
       {
@@ -691,8 +723,8 @@
           }
         },
         "contextWindow": 1000000,
-        "arenaScore": 1581,
-        "arenaRank": 11,
+        "arenaScore": 1578,
+        "arenaRank": 12,
         "arenaSlug": "deepseek-v4-flash-high"
       },
       {
@@ -729,24 +761,24 @@
           }
         },
         "contextWindow": 500000,
-        "arenaScore": 1555,
-        "arenaRank": 15,
+        "arenaScore": 1557,
+        "arenaRank": 16,
         "arenaSlug": "grok-4.5"
       },
       {
         "model": "opencode-go/hy3",
         "variant": null,
         "cost": {
-          "input": 0.14,
-          "output": 0.58,
+          "input": 0.0175,
+          "output": 0.0725,
           "cache": {
-            "read": 0.035,
+            "read": 0.004375,
             "write": 0
           }
         },
         "contextWindow": 256000,
-        "arenaScore": 1522,
-        "arenaRank": 24,
+        "arenaScore": 1517,
+        "arenaRank": 27,
         "arenaSlug": "hy3"
       },
       {
@@ -784,7 +816,7 @@
         },
         "contextWindow": 1050000,
         "arenaScore": 1517,
-        "arenaRank": 28,
+        "arenaRank": 29,
         "arenaSlug": "gpt-5.6-luna-xhigh (codex-harness)"
       },
       {
@@ -800,7 +832,7 @@
         },
         "contextWindow": 202752,
         "arenaScore": 1510,
-        "arenaRank": 29,
+        "arenaRank": 30,
         "arenaSlug": "glm-5.1"
       },
       {
@@ -816,7 +848,7 @@
         },
         "contextWindow": 262144,
         "arenaScore": 1509,
-        "arenaRank": 30,
+        "arenaRank": 31,
         "arenaSlug": "kimi-k2.6"
       },
       {
@@ -853,8 +885,8 @@
           }
         },
         "contextWindow": 1000000,
-        "arenaScore": 1490,
-        "arenaRank": 34,
+        "arenaScore": 1489,
+        "arenaRank": 36,
         "arenaSlug": "minimax-m3"
       },
       {
@@ -869,8 +901,8 @@
           }
         },
         "contextWindow": 1048576,
-        "arenaScore": 1474,
-        "arenaRank": 38,
+        "arenaScore": 1476,
+        "arenaRank": 39,
         "arenaSlug": "mimo-v2.5-pro"
       },
       {
@@ -886,7 +918,7 @@
         },
         "contextWindow": 262144,
         "arenaScore": 1473,
-        "arenaRank": 39,
+        "arenaRank": 40,
         "arenaSlug": "kimi-k2.7-code"
       },
       {
@@ -924,7 +956,7 @@
         },
         "contextWindow": 1000000,
         "arenaScore": 1460,
-        "arenaRank": 43,
+        "arenaRank": 44,
         "arenaSlug": "qwen3.6-plus"
       },
       {
@@ -940,7 +972,7 @@
         },
         "contextWindow": 1000000,
         "arenaScore": 1446,
-        "arenaRank": 47,
+        "arenaRank": 48,
         "arenaSlug": "deepseek-v4-pro"
       },
       {
@@ -956,7 +988,7 @@
         },
         "contextWindow": 1000000,
         "arenaScore": 1438,
-        "arenaRank": 50,
+        "arenaRank": 51,
         "arenaSlug": "mimo-v2.5"
       },
       {
@@ -971,8 +1003,8 @@
           }
         },
         "contextWindow": 204800,
-        "arenaScore": 1397,
-        "arenaRank": 65,
+        "arenaScore": 1398,
+        "arenaRank": 66,
         "arenaSlug": "minimax-m2.7"
       }
     ]
@@ -982,16 +1014,16 @@
       "model": "opencode-go/hy3",
       "variant": null,
       "cost": {
-        "input": 0.14,
-        "output": 0.58,
+        "input": 0.0175,
+        "output": 0.0725,
         "cache": {
-          "read": 0.035,
+          "read": 0.004375,
           "write": 0
         }
       },
       "contextWindow": 256000,
-      "arenaScore": 1522,
-      "arenaRank": 24,
+      "arenaScore": 1517,
+      "arenaRank": 27,
       "arenaSlug": "hy3"
     },
     {
@@ -1007,7 +1039,7 @@
       },
       "contextWindow": 1000000,
       "arenaScore": 1438,
-      "arenaRank": 50,
+      "arenaRank": 51,
       "arenaSlug": "mimo-v2.5"
     },
     {
@@ -1045,7 +1077,7 @@
       },
       "contextWindow": 1050000,
       "arenaScore": 1517,
-      "arenaRank": 28,
+      "arenaRank": 29,
       "arenaSlug": "gpt-5.6-luna-xhigh (codex-harness)"
     },
     {
@@ -1060,8 +1092,8 @@
         }
       },
       "contextWindow": 1000000,
-      "arenaScore": 1581,
-      "arenaRank": 11,
+      "arenaScore": 1578,
+      "arenaRank": 12,
       "arenaSlug": "deepseek-v4-flash-high"
     },
     {
@@ -1076,8 +1108,8 @@
         }
       },
       "contextWindow": 204800,
-      "arenaScore": 1397,
-      "arenaRank": 65,
+      "arenaScore": 1398,
+      "arenaRank": 66,
       "arenaSlug": "minimax-m2.7"
     },
     {
@@ -1114,8 +1146,8 @@
         }
       },
       "contextWindow": 1000000,
-      "arenaScore": 1490,
-      "arenaRank": 34,
+      "arenaScore": 1489,
+      "arenaRank": 36,
       "arenaSlug": "minimax-m3"
     },
     {
@@ -1130,8 +1162,8 @@
         }
       },
       "contextWindow": 1048576,
-      "arenaScore": 1474,
-      "arenaRank": 38,
+      "arenaScore": 1476,
+      "arenaRank": 39,
       "arenaSlug": "mimo-v2.5-pro"
     },
     {
@@ -1169,7 +1201,7 @@
       },
       "contextWindow": 1000000,
       "arenaScore": 1460,
-      "arenaRank": 43,
+      "arenaRank": 44,
       "arenaSlug": "qwen3.6-plus"
     },
     {
@@ -1185,7 +1217,7 @@
       },
       "contextWindow": 1000000,
       "arenaScore": 1446,
-      "arenaRank": 47,
+      "arenaRank": 48,
       "arenaSlug": "deepseek-v4-pro"
     },
     {
@@ -1201,7 +1233,7 @@
       },
       "contextWindow": 262144,
       "arenaScore": 1509,
-      "arenaRank": 30,
+      "arenaRank": 31,
       "arenaSlug": "kimi-k2.6"
     },
     {
@@ -1217,7 +1249,7 @@
       },
       "contextWindow": 262144,
       "arenaScore": 1473,
-      "arenaRank": 39,
+      "arenaRank": 40,
       "arenaSlug": "kimi-k2.7-code"
     },
     {
@@ -1233,7 +1265,7 @@
       },
       "contextWindow": 202752,
       "arenaScore": 1510,
-      "arenaRank": 29,
+      "arenaRank": 30,
       "arenaSlug": "glm-5.1"
     },
     {
@@ -1248,9 +1280,25 @@
         }
       },
       "contextWindow": 1000000,
-      "arenaScore": 1585,
-      "arenaRank": 9,
+      "arenaScore": 1582,
+      "arenaRank": 11,
       "arenaSlug": "glm-5.2-max"
+    },
+    {
+      "model": "opencode-go/glm-5.3",
+      "variant": "max",
+      "cost": {
+        "input": 1.4,
+        "output": 4.4,
+        "cache": {
+          "read": 0.26,
+          "write": 0
+        }
+      },
+      "contextWindow": 1000000,
+      "arenaScore": 1597,
+      "arenaRank": 8,
+      "arenaSlug": "glm-5.3-max"
     },
     {
       "model": "opencode-go/grok-4.5",
@@ -1286,8 +1334,8 @@
         }
       },
       "contextWindow": 500000,
-      "arenaScore": 1555,
-      "arenaRank": 15,
+      "arenaScore": 1557,
+      "arenaRank": 16,
       "arenaSlug": "grok-4.5"
     },
     {
@@ -1302,7 +1350,7 @@
         }
       },
       "contextWindow": 1000000,
-      "arenaScore": 1667,
+      "arenaScore": 1669,
       "arenaRank": 3,
       "arenaSlug": "qwen3.8-max"
     },
@@ -1324,11 +1372,12 @@
     }
   ],
   "unmatched": [
-    "opencode-go/glm-5.3",
+    "opencode-go/deepseek-v4-flash-vision-exp",
     "opencode-go/muse-spark-1.2-contributor",
+    "opencode-go/ox-alpha-free",
     "opencode-go/qwen3.7-max",
     "opencode-go/qwen3.7-plus"
   ],
   "blocked": [],
-  "computedAt": 1787144058018
+  "computedAt": 1787359354359
 }

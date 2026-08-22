@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -22,6 +23,8 @@ import {
 import { computeTierMap } from "./rank.js";
 import { readUsageLog, summarizeUsage } from "./usage.js";
 import { runAudit, runInvestigate, runGoal, runJob, MAX_PARTICIPANTS } from "./orchestrate.js";
+import { ALL_LENS_KEYS, DEFAULT_LENS_KEYS, MIN_REPLICAS } from "./lenses.js";
+import { runSweep, planSweep, loadSweep, listSweeps } from "./sweep.js";
 
 /**
  * Mark a tier's final winner as `inherited` when a strictly cheaper tier's
@@ -482,7 +485,10 @@ server.tool(
   "opencode_audit",
   `Fan out N (default 16, wider — up to 24 — when the free local pinned model is active; stays at this default otherwise, max ${MAX_PARTICIPANTS}) independent read-only reviewers over a diff — by default the CURRENT uncommitted changes (\`git diff HEAD\` in \`dir\`), or everything since \`baseCommit\` when given (review a whole branch/PR instead of just what's uncommitted). Computed once by this tool, not left for each agent to run itself. If the diff is large (~100k+ tokens), participants stop getting the full diff and instead each review a distinct subset of the changed files independently (still parallel, just partitioned). Each reviewer is forced onto a dedicated "mcp-readonly" opencode agent (registered in opencode.jsonc with edit/bash/task/skill all denied at the permission-engine level — a real guarantee, not a prompt request) and assigned a rotating lens (correctness, security, simplification, efficiency, tests, consistency, error handling, readability) so N reviews of the same diff under the same model actually diverge instead of duplicating each other.\n\nReconciliation: one aggregator reads all N participants' findings and builds a single report, explicitly noting how many participants corroborated each finding (2+ = confirmed, 1 = low confidence — not silently trusted). Then, \`depth\` times (default 1), a FRESH batch of N adversarial reviewers gets ONLY that report plus the framing "a low-confidence agent reported this, your job is to determine its falseness" — each independently tries to refute the low-confidence items using its own read-only access to the code — and one more aggregator reconciles [previous report + all adversarial reviews] into an updated report, promoting anything that survived (labeled "adversarially confirmed") and calling out (never silently dropping) anything refuted. \`depth=0\` skips the adversarial step entirely; \`depth=2\` repeats the whole adversarial-round-then-reaggregate step twice, for higher-criticality reviews. Returns the final report text plus per-round job metadata. If there are no changes, returns immediately with no jobs spawned.\n\nDefault output is LEAN: \`participants\` entries carry status/tokens/cost only, never the underlying prompt — echoing the full diff back once per participant is pure bloat (observed 2026-08-19: 650KB of a 773KB response was duplicated prompts, next to a 5KB actual answer). \`reconciliation.report\` is always the real answer, always returned in full. Pass \`verbose: true\` to also get each participant's raw findings text.`,
   {
-    count: z.number().int().min(1).max(MAX_PARTICIPANTS).optional().describe(`Number of parallel reviewers (reused as the adversarial-round size too). Default 16 (wider — up to 24 — when the free local pinned model is active; stays at this default otherwise).`),
+    lenses: z.union([z.literal("all"), z.array(z.enum(ALL_LENS_KEYS))]).optional().describe(`Which QA lenses to run. Omit for the 6 core lenses (${DEFAULT_LENS_KEYS.join(", ")}); pass "all" for every lens including ${ALL_LENS_KEYS.filter((k) => !DEFAULT_LENS_KEYS.includes(k)).join(", ")}; or pass an explicit subset.`),
+    replicas: z.number().int().min(MIN_REPLICAS).optional().describe(`How many INDEPENDENT reviewers each selected lens gets. Default ${MIN_REPLICAS}, minimum ${MIN_REPLICAS} — corroboration is what makes the confidence ranking mean anything, so a lens is never reviewed only once. Total participants = lenses x replicas (clamped to MAX_PARTICIPANTS). Prefer raising this over \`count\`.`),
+    count: z.number().int().min(1).max(MAX_PARTICIPANTS).optional().describe(`LEGACY: exact total participants, round-robined across lenses (uneven coverage — some lenses get more reviewers than others). Overrides \`replicas\` when set. Prefer \`replicas\`.`),
+    contextFile: z.string().optional().describe("Path to a file describing the project's domain/architecture, prepended to every reviewer's prompt. Omit to auto-detect AGENTS.md / CLAUDE.md / CONTRIBUTING.md / README.md in `dir`."),
     dir: z.string().optional().describe("Absolute path of the git repo to audit. Defaults to this server's cwd."),
     baseCommit: z.string().optional().describe('Review everything since this commit ("git diff <baseCommit> HEAD") instead of just uncommitted changes — e.g. to review a whole feature branch/PR.'),
     focus: z.string().optional().describe("Optional extra instruction appended to every reviewer's prompt (e.g. \"pay special attention to the auth changes\")."),
@@ -493,9 +499,9 @@ server.tool(
     depth: z.number().int().min(0).max(3).optional().describe(`Adversarial-round-then-reaggregate repetitions (default 1). 0 skips adversarial verification entirely (fastest/cheapest); 1 = one round; 2 = two rounds for higher-criticality reviews (more rigor, more cost).`),
     verbose: z.boolean().optional().describe("Default false: participants carry only status/tokens/cost, never the underlying prompt. Set true to also include each participant's own raw findings text — useful for debugging the reconciliation, not needed for normal use."),
   },
-  async ({ count, dir, baseCommit, focus, tier, model, variant, waitMs, depth, verbose }) => {
+  async ({ count, replicas, lenses, contextFile, dir, baseCommit, focus, tier, model, variant, waitMs, depth, verbose }) => {
     try {
-      return ok(await runAudit({ count, dir, baseCommit, focus, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS, depth: depth ?? 1, verbose: verbose ?? false }));
+      return ok(await runAudit({ count, replicas, lenses, contextFile, dir, baseCommit, focus, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS, depth: depth ?? 1, verbose: verbose ?? false }));
     } catch (e) {
       return err(String(e.message ?? e));
     }
@@ -573,6 +579,118 @@ server.tool(
   async ({ goal, passes, lintCommand, testCommand, checkTimeoutMs, qaCount, qaDepth, dir, agent, tier, model, variant, waitMs, verbose }) => {
     try {
       return ok(await runJob({ goal, passes, lintCommand, testCommand, checkTimeoutMs, qaCount, qaDepth, dir, agent, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS, verbose: verbose ?? false }));
+    } catch (e) {
+      return err(String(e.message ?? e));
+    }
+  }
+);
+
+// Sweeps outlive the tool call that starts them (a whole-repo sweep runs for
+// an hour or more, far past any MCP client's request timeout), so they run
+// detached here and are polled via opencode_sweep_status. State is
+// checkpointed to disk after every segment, so a partial sweep survives even
+// this process dying — same convention as job-store.js.
+const runningSweeps = new Map();
+
+server.tool(
+  "opencode_sweep",
+  `Audit an ENTIRE codebase, not just a diff. Segments the repo into token-budgeted chunks, runs the full lens swarm (see opencode_audit) over each segment in turn, and accumulates confirmed findings into a ledger that is injected into every LATER segment — so reviewers stop re-reporting known bugs and instead hunt for OTHER instances of the same bug class. Refuted findings are carried forward too, so a false positive dismissed in segment 3 isn't re-litigated in segment 12.\n\nSegments are packed by PATH, not by size, so a directory stays together and cross-file defects (caller vs callee, two symmetric paths updated inconsistently) are visible within one segment. A segment is a STARTING POINT, not a cage: reviewers are told to follow a flow across any other file in the repo when tracing it end-to-end is what the lens requires.\n\nFile selection is language-agnostic and yours to control: \`sourceExtensions\` picks what counts as source, \`includeGlobs\`/\`excludeGlobs\` narrow it further, and generated files are detected both by pattern (\`*.g.*\`, \`*.pb.*\`, \`*.generated.*\`, lockfiles, vendor/build dirs) and by sniffing for \`@generated\`-style headers in any language. ALWAYS run with \`plan: true\` first — it returns the file/segment breakdown and job estimate for free, with no agents spawned, so you can fix your filters before committing to a run that takes an hour.\n\nThis tool RETURNS IMMEDIATELY with a \`sweepId\`; the sweep continues in the background. Poll opencode_sweep_status for progress and the final report. A full markdown report is rewritten to disk after every segment, so partial results are always recoverable.`,
+  {
+    dir: z.string().optional().describe("Absolute path of the repo to sweep. Defaults to this server's cwd."),
+    plan: z.boolean().optional().describe("If true, spawn NOTHING — just return which files/segments would be reviewed plus a job estimate. Run this first, always."),
+    lenses: z.union([z.literal("all"), z.array(z.enum(ALL_LENS_KEYS))]).optional().describe(`Which QA lenses to run. Omit for the 6 core lenses; "all" for every lens (${ALL_LENS_KEYS.length} total); or an explicit subset.`),
+    replicas: z.number().int().min(MIN_REPLICAS).optional().describe(`Independent reviewers per lens, per segment. Default ${MIN_REPLICAS}, minimum ${MIN_REPLICAS}. Multiplies total runtime — check the \`plan\` estimate before raising it.`),
+    depth: z.number().int().min(0).max(3).optional().describe("Adversarial verification rounds per segment (default 1). 0 is much faster and much noisier across a whole repo; 1 is the sane default here."),
+    budgetTokens: z.number().int().min(4000).optional().describe("Approx token budget per segment (default 40000). Lower = more, smaller segments = slower but more focused."),
+    includeGlobs: z.array(z.string()).optional().describe('Restrict the sweep to paths matching these globs, e.g. ["lib/**", "src/**"]. Supports ** and *.'),
+    excludeGlobs: z.array(z.string()).optional().describe("Extra globs to exclude, on top of the built-in vendor/build/generated/lockfile defaults."),
+    sourceExtensions: z.array(z.string()).optional().describe('Override what counts as reviewable source, e.g. [".dart"] or [".ts", ".tsx"]. Omit for a broad multi-language default.'),
+    skipGeneratedSniff: z.boolean().optional().describe("Skip reading each file's header to detect @generated markers. Faster discovery, but generated code may slip in."),
+    maxSegments: z.number().int().min(1).optional().describe("Hard cap on segments reviewed — useful to trial the first N segments of a big repo before committing to all of it."),
+    contextFile: z.string().optional().describe("Project/domain context file prepended to every reviewer's prompt. Omit to auto-detect AGENTS.md / CLAUDE.md / CONTRIBUTING.md / README.md."),
+    focus: z.string().optional().describe("Extra instruction appended to every reviewer's prompt across all segments."),
+    tier: z.enum(TIER_NAMES).optional().describe(`Tier for every job in the sweep. Default "${DEFAULT_TIER}". Ignored if \`model\` is set or a pin is active.`),
+    model: z.string().optional().describe('Explicit "provider/model" override for every job in the sweep.'),
+    variant: z.string().optional().describe("Reasoning-effort variant to pair with an explicit model."),
+    waitMs: z.number().int().min(1000).max(540000).optional().describe(`Per-JOB wait cap (not per sweep). Default ${ORCHESTRATION_WAIT_MS}.`),
+  },
+  async ({ plan, dir, lenses, replicas, depth, budgetTokens, includeGlobs, excludeGlobs, sourceExtensions, skipGeneratedSniff, maxSegments, contextFile, focus, tier, model, variant, waitMs }) => {
+    try {
+      const common = { dir, lenses, replicas, depth: depth ?? 1, budgetTokens, includeGlobs, excludeGlobs, sourceExtensions, skipGeneratedSniff, maxSegments, contextFile, focus, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS };
+      if (plan) return ok({ plan: true, ...planSweep(common) });
+
+      const preview = planSweep(common);
+      if (!preview.segmentCount) {
+        return err(`No reviewable source files found in ${preview.dir}. Check includeGlobs/excludeGlobs/sourceExtensions — ${preview.skipped.notSource} file(s) were skipped as non-source and ${preview.skipped.excluded} as excluded.`);
+      }
+
+      // Id is minted HERE, not inside runSweep, so the caller is guaranteed a
+      // pollable id no matter when the background run first checkpoints.
+      const sweepId = randomUUID();
+      // Detached on purpose — see the comment above runningSweeps.
+      runSweep({
+        ...common,
+        sweepId,
+        onUpdate: (state) => runningSweeps.set(state.sweepId, state),
+      }).catch((e) => {
+        console.error("[opencode-mcp] sweep crashed:", e?.message ?? e);
+      });
+
+      return ok({
+        sweepId,
+        status: "running",
+        message: "Sweep started in the background. Poll opencode_sweep_status with this sweepId; the markdown report on disk is rewritten after every segment.",
+        totalSegments: preview.segmentCount,
+        fileCount: preview.fileCount,
+        lenses: preview.lenses,
+        replicas: preview.replicas,
+        estimatedJobs: preview.estimatedJobs,
+        skipped: preview.skipped,
+      });
+    } catch (e) {
+      return err(String(e.message ?? e));
+    }
+  }
+);
+
+server.tool(
+  "opencode_sweep_status",
+  "Check a sweep started with opencode_sweep. Returns progress (segments done / total), the accumulated confirmed-findings ledger, and the path to the full markdown report on disk (rewritten after every segment, so it's useful long before the sweep finishes). Reads from disk, so it works across a server restart or from a different session. Omit `sweepId` to list all known sweeps newest-first.",
+  {
+    sweepId: z.string().optional().describe("The sweep to check. Omit to list every known sweep instead."),
+    verbose: z.boolean().optional().describe("Include each segment's full reconciled report text. Default false — the report file on disk already has all of it."),
+  },
+  async ({ sweepId, verbose }) => {
+    try {
+      if (!sweepId) return ok({ sweeps: listSweeps() });
+      const state = runningSweeps.get(sweepId) ?? loadSweep(sweepId);
+      if (!state) return err(`No sweep with id "${sweepId}" (checked memory and ${"~/.local/share/opencode-mcp/sweeps"}).`);
+      return ok({
+        sweepId: state.sweepId,
+        dir: state.dir,
+        status: state.status,
+        completedSegments: state.completedSegments,
+        totalSegments: state.totalSegments,
+        fileCount: state.fileCount,
+        lenses: state.lensKeys,
+        replicas: state.replicas,
+        depth: state.depth,
+        projectContextFile: state.projectContextFile,
+        reportPath: state.reportPath,
+        startedAt: state.startedAt,
+        finishedAt: state.finishedAt,
+        error: state.error,
+        confirmedFindings: state.ledger,
+        segments: state.segments.map((s) => ({
+          index: s.index,
+          status: s.status,
+          fileCount: s.files.length,
+          approxTokens: s.approxTokens,
+          findingCount: s.findings?.length ?? 0,
+          error: s.error,
+          ...(verbose ? { report: s.report } : {}),
+        })),
+      });
     } catch (e) {
       return err(String(e.message ?? e));
     }
