@@ -343,12 +343,24 @@ async function runReadOnlyBatch({ count, buildPrompt, dir, model, variant, tier,
   return jobIds.map((id, i) => ({ index: i, ...jobSummary(getJob(id)) }));
 }
 
+// Per-source cap on what reaches an aggregator. Without it the aggregator
+// prompt grows as participants x however verbose each one felt like being:
+// observed 2026-08-22 at replicas=2 over 12 lenses, a 162k-char aggregator
+// prompt took a local model past a 5-minute wait and the whole segment came
+// back empty. Findings are supposed to be terse (see FINDING_FORMAT); a
+// participant that rambles past this is truncated rather than allowed to
+// starve the other 23.
+const MAX_SOURCE_CHARS_FOR_AGGREGATOR = 6000;
+
 /** One read-only job that reconciles a set of labeled text sources into a single report. */
 async function aggregate({ instructions, sources, dir, model, variant, tier, waitMs, title }) {
   const resolved = resolveModel({ model, variant, tier });
   const body = sources
     .map((s) => {
-      const label = s.status === "completed" || s.status === undefined ? s.text || "(no output)" : `[${s.status}] ${s.errorMessage ?? "(no output)"}`;
+      let label = s.status === "completed" || s.status === undefined ? s.text || "(no output)" : `[${s.status}] ${s.errorMessage ?? "(no output)"}`;
+      if (label.length > MAX_SOURCE_CHARS_FOR_AGGREGATOR) {
+        label = `${label.slice(0, MAX_SOURCE_CHARS_FOR_AGGREGATOR)}\n[...truncated — this reviewer's output exceeded the per-source limit...]`;
+      }
       return `### ${s.label}\n${label}`;
     })
     .join("\n\n");
@@ -362,6 +374,113 @@ async function aggregate({ instructions, sources, dir, model, variant, tier, wai
   });
   await waitForJob(jobId, waitMs);
   return jobSummary(getJob(jobId));
+}
+
+const DEFAULT_GROUP_SIZE = 4;
+
+/** Split `arr` into `Math.ceil(arr.length / maxSize)` groups, sized as evenly as possible (never a lone straggler in the last group). */
+function chunkEvenly(arr, maxSize) {
+  const numGroups = Math.ceil(arr.length / maxSize);
+  const base = Math.floor(arr.length / numGroups);
+  const remainder = arr.length % numGroups;
+  const groups = [];
+  let idx = 0;
+  for (let g = 0; g < numGroups; g++) {
+    const size = base + (g < remainder ? 1 : 0);
+    groups.push(arr.slice(idx, idx + size));
+    idx += size;
+  }
+  return groups;
+}
+
+/**
+ * Merge many labeled sources into ONE report via a tree of aggregator calls,
+ * each combining at most `groupSize` sources, instead of one aggregator
+ * reading all N at once.
+ *
+ * This exists because a flat aggregator's prompt scales with N x (whatever
+ * each participant wrote) — observed 2026-08-22: 24 participants x ~7k chars
+ * each produced a 162k-char aggregator prompt that outran a local model's
+ * 5-minute wait entirely, and the whole segment silently came back as an
+ * empty report (see MAX_SOURCE_CHARS_FOR_AGGREGATOR — that caps ONE source,
+ * this caps how many sources reach one call). Chunking bounds every single
+ * aggregator call's input regardless of how wide the swarm gets, and the
+ * leaf-level calls run IN PARALLEL — they're independent — so wall-clock
+ * time drops too, not just risk.
+ *
+ * `preface` (optional) is context repeated in every LEAF-level call, not
+ * counted toward `groupSize` — used for "here is the report you're updating"
+ * in the adversarial reaggregation step, where every group needs the same
+ * shared context alongside its own slice of sources.
+ *
+ * `leafInstructions(n)`/`mergeInstructions(n)` build the aggregator prompt
+ * for a group of `n` — leaf groups see raw sources, merge levels see
+ * already-reconciled partial reports and must be told explicitly to ADD UP
+ * corroboration counts across partials rather than treat each partial's
+ * count as final (a finding raised by 2 of 4 in one partial and 1 of 4 in
+ * another is raised by 3 of 8 overall — CONFIRMED, even though neither
+ * partial alone had it at 2+).
+ */
+async function reduceSources({ sources, preface, leafInstructions, mergeInstructions, groupSize, dir, model, variant, tier, waitMs, titlePrefix }) {
+  const size = Math.max(2, Number.isInteger(groupSize) ? groupSize : DEFAULT_GROUP_SIZE);
+  const levels = [];
+  let current = sources;
+  let isLeaf = true;
+  let level = 0;
+
+  while (current.length > size) {
+    const groups = chunkEvenly(current, size);
+    const results = await Promise.all(
+      groups.map((group) =>
+        aggregate({
+          instructions: isLeaf ? leafInstructions(group.length) : mergeInstructions(group.length),
+          sources: isLeaf && preface ? [...preface, ...group] : group,
+          dir,
+          model,
+          variant,
+          tier,
+          waitMs,
+          title: `${titlePrefix}-l${level}-g${groups.indexOf(group) + 1}`,
+        })
+      )
+    );
+    levels.push({ level, groupCount: groups.length, jobs: results.map((r) => ({ status: r.status, tokens: r.tokens, cost: r.cost })) });
+
+    const failed = results.find((r) => r.status !== "completed");
+    if (failed) {
+      return { report: null, status: failed.status, errorMessage: failed.errorMessage, levels, incomplete: true };
+    }
+
+    current = results.map((r, gi) => ({
+      label: `Partial report ${gi + 1}/${groups.length} (tree level ${level}, ${groups[gi].length} source(s))`,
+      text: r.text,
+      status: r.status,
+    }));
+    isLeaf = false;
+    level++;
+  }
+
+  const final = await aggregate({
+    instructions: isLeaf ? leafInstructions(current.length) : mergeInstructions(current.length),
+    sources: isLeaf && preface ? [...preface, ...current] : current,
+    dir,
+    model,
+    variant,
+    tier,
+    waitMs,
+    title: `${titlePrefix}-l${level}-final`,
+  });
+  levels.push({ level, groupCount: 1, jobs: [{ status: final.status, tokens: final.tokens, cost: final.cost }] });
+
+  return {
+    report: final.text,
+    status: final.status,
+    errorMessage: final.errorMessage,
+    tokens: final.tokens,
+    cost: final.cost,
+    levels,
+    incomplete: final.status !== "completed",
+  };
 }
 
 /**
@@ -384,32 +503,41 @@ async function aggregate({ instructions, sources, dir, model, variant, tier, wai
  * Returns { report (final markdown/text), depth, rounds (per-stage job
  * metadata for debugging), finalJob }.
  */
-async function reconcileRecursive({ participants, context, depth, count, dir, model, variant, tier, waitMs, emitFindingsBlock = false }) {
+async function reconcileRecursive({ participants, context, depth, count, dir, model, variant, tier, waitMs, emitFindingsBlock = false, groupSize }) {
   const depthVal = clampDepth(depth);
   const rounds = [];
   // Only the LAST aggregation emits the machine-readable block — asking every
   // round for it would just be parsed and thrown away until the final one.
   const blockIf = (isFinal) => (emitFindingsBlock && isFinal ? FINDINGS_BLOCK_INSTRUCTION : "");
 
-  let report = await aggregate({
-    instructions:
-      `You are the aggregator for an independent multi-agent review. ${context}\n\n` +
-      `Below are ${participants.length} independent participants' findings. Build ONE unified report: merge ` +
-      `overlapping findings, and for EACH finding explicitly note how many of the ${participants.length} ` +
-      `participants raised it. Treat anything raised by only 1 participant as LOW CONFIDENCE and label it as such; ` +
-      `anything raised by 2 or more is CONFIRMED. Drop anything that's clearly not a real issue. Rank by severity.` +
-      blockIf(depthVal === 0),
+  const round0 = await reduceSources({
     sources: participants.map((p, i) => ({ label: `Participant ${i + 1}${p.lens ? ` (lens: ${p.lens})` : ""}`, text: p.text, status: p.status, errorMessage: p.errorMessage })),
+    leafInstructions: (n) =>
+      `You are the aggregator for an independent multi-agent review. ${context}\n\n` +
+      `Below are ${n} independent participants' findings (out of ${participants.length} total in this review — you are ` +
+      `handling one group of them). Build ONE unified report FOR THIS GROUP: merge overlapping findings, and for EACH ` +
+      `finding explicitly state how many of THESE ${n} participants raised it (be precise — this count may later be ` +
+      `combined with other groups' counts). Drop anything that's clearly not a real issue. Rank by severity.`,
+    mergeInstructions: (n) =>
+      `You are merging ${n} partial reports, each already reconciled from a different subset of the full ${participants.length}-participant review. ${context}\n\n` +
+      `Build ONE combined report: when the SAME finding appears in multiple partial reports, ADD UP the participant ` +
+      `counts each one reports to get its TRUE total corroboration across all ${participants.length} original ` +
+      `participants — e.g. a finding at 2-of-4 in one partial and 1-of-4 in another is 3-of-8 combined, which is ` +
+      `CONFIRMED overall even though neither partial alone reached 2. A finding is CONFIRMED if its combined count is ` +
+      `2 or more; otherwise it is LOW CONFIDENCE. Rank by severity.` +
+      blockIf(depthVal === 0),
+    groupSize,
     dir,
     model,
     variant,
     tier,
     waitMs,
-    title: "mcp-aggregate-r0",
+    titlePrefix: "mcp-aggregate-r0",
   });
-  rounds.push({ stage: "aggregate", round: 0, status: report.status, tokens: report.tokens, cost: report.cost });
+  rounds.push({ stage: "aggregate", round: 0, levels: round0.levels });
 
-  if (report.status !== "completed") {
+  let report = { text: round0.report, status: round0.status, errorMessage: round0.errorMessage, tokens: round0.tokens, cost: round0.cost };
+  if (round0.incomplete || report.status !== "completed") {
     return { report: report.text || "", depth: depthVal, rounds, finalJob: { status: report.status, errorMessage: report.errorMessage }, incomplete: true };
   }
 
@@ -434,32 +562,37 @@ async function reconcileRecursive({ participants, context, depth, count, dir, mo
     });
     rounds.push({ stage: "adversarial", round, jobs: adversaries.map((a) => ({ status: a.status, tokens: a.tokens, cost: a.cost })) });
 
-    const reaggregated = await aggregate({
-      instructions:
-        `You are the aggregator, reconciliation round ${round + 1}. Below is the PREVIOUS report, followed by ` +
-        `${count} independent adversarial reviews that tried to refute its low-confidence findings. Build an UPDATED ` +
-        `unified report: promote any low-confidence finding that survived adversarial scrutiny (label it ` +
-        `"adversarially confirmed", noting it started single-source but held up), call out and separately list ` +
-        `anything the adversaries convincingly refuted (never silently delete it — keep it visible for transparency), ` +
-        `and keep everything already confirmed as-is. ${context}` +
+    const reaggregated = await reduceSources({
+      sources: adversaries.map((a, i) => ({ label: `Adversarial reviewer ${i + 1}`, text: a.text, status: a.status, errorMessage: a.errorMessage })),
+      preface: [{ label: "Previous report (context for every group below)", text: report.text, status: report.status }],
+      leafInstructions: (n) =>
+        `You are the aggregator, reconciliation round ${round + 1}, handling one group of ${n} independent adversarial ` +
+        `reviews (out of ${count} total this round) against the previous report shown above. For each low-confidence ` +
+        `finding these ${n} reviewers addressed, state whether it survived (per THESE reviewers) or was refuted. ` +
+        `Produce a partial updated report: preserve everything already CONFIRMED in the previous report unchanged, and ` +
+        `be precise about which specific findings you're speaking to — this may be combined with other groups' partial ` +
+        `verdicts on the SAME findings next. ${context}`,
+      mergeInstructions: (n) =>
+        `You are merging ${n} partial reconciliation-round reports, each covering a different subset of independent ` +
+        `adversarial reviews against the SAME previous report. Combine them into ONE final updated report: a ` +
+        `low-confidence finding is promoted to "adversarially confirmed" only if EVERY partial report that addressed ` +
+        `it says it survived — if ANY partial says a finding was refuted, treat it as refuted and list it separately ` +
+        `for transparency (never silently drop it). Keep everything already confirmed as-is. Rank by severity. ${context}` +
         blockIf(round === depthVal),
-      sources: [
-        { label: "Previous report", text: report.text, status: report.status },
-        ...adversaries.map((a, i) => ({ label: `Adversarial reviewer ${i + 1}`, text: a.text, status: a.status, errorMessage: a.errorMessage })),
-      ],
+      groupSize,
       dir,
       model,
       variant,
       tier,
       waitMs,
-      title: `mcp-aggregate-r${round}`,
+      titlePrefix: `mcp-aggregate-r${round}`,
     });
-    rounds.push({ stage: "aggregate", round, status: reaggregated.status, tokens: reaggregated.tokens, cost: reaggregated.cost });
+    rounds.push({ stage: "aggregate", round, levels: reaggregated.levels });
 
-    if (reaggregated.status !== "completed") {
+    if (reaggregated.incomplete || reaggregated.status !== "completed") {
       return { report: report.text, depth: depthVal, rounds, finalJob: { status: reaggregated.status, errorMessage: reaggregated.errorMessage }, incomplete: true };
     }
-    report = reaggregated;
+    report = { text: reaggregated.report, status: reaggregated.status, tokens: reaggregated.tokens, cost: reaggregated.cost };
   }
 
   return {
@@ -490,6 +623,7 @@ async function runLensSwarm({
   replicas,
   count,
   depth,
+  groupSize,
   dir,
   model,
   variant,
@@ -550,6 +684,7 @@ async function runLensSwarm({
     context,
     depth,
     count: assignments.length,
+    groupSize,
     dir,
     model,
     variant,
@@ -575,6 +710,7 @@ export async function runAudit({
   count,
   replicas,
   lenses: lensSelection,
+  groupSize,
   dir,
   model,
   variant,
@@ -638,6 +774,7 @@ export async function runAudit({
     replicas,
     count,
     depth,
+    groupSize,
     dir,
     model,
     variant,
@@ -678,7 +815,7 @@ export { runLensSwarm };
  * deterministic model would otherwise just duplicate each other) instead of
  * a fixed lens list, since the question itself is open-ended.
  */
-export async function runInvestigate({ prompt, count, dir, model, variant, tier, waitMs, depth = 1, verbose = false }) {
+export async function runInvestigate({ prompt, count, groupSize, dir, model, variant, tier, waitMs, depth = 1, verbose = false }) {
   const n = clampCount(count, defaultWidth({ model, tier }, 16, 5));
   const buildPrompt = (i, total) =>
     `${prompt}\n\n---\nYou are investigator #${i + 1} of ${total} looking into this independently. ` +
@@ -699,7 +836,7 @@ export async function runInvestigate({ prompt, count, dir, model, variant, tier,
 
   const context = `${n} independent read-only investigators looked into the question: "${prompt}"`;
 
-  const reconciliation = await reconcileRecursive({ participants, context, depth, count: n, dir, model, variant, tier, waitMs });
+  const reconciliation = await reconcileRecursive({ participants, context, depth, count: n, groupSize, dir, model, variant, tier, waitMs });
   const participantsForReturn = participants.map((p) => ({ index: p.index, ...trimJob(p, { keepText: verbose }) }));
 
   return { prompt, participantCount: n, participants: participantsForReturn, reconciliation };

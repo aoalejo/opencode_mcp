@@ -342,6 +342,7 @@ export async function runSweep(opts) {
     lenses: lensSelection,
     replicas,
     depth = 1,
+    groupSize,
     budgetTokens = DEFAULT_SEGMENT_TOKENS,
     includeGlobs,
     excludeGlobs,
@@ -424,6 +425,7 @@ export async function runSweep(opts) {
           lenses,
           replicas,
           depth,
+          groupSize,
           dir: cwd,
           model,
           variant,
@@ -442,7 +444,18 @@ export async function runSweep(opts) {
             `genuine defect in a file outside the sector, report it too and say explicitly that it is outside your sector.`,
         });
 
-        entry.status = "completed";
+        // A reconciliation that timed out mid-way returns `incomplete` with an
+        // empty report. Marking that segment "completed" with zero findings
+        // would be indistinguishable from a genuinely clean segment — the one
+        // outcome this whole pipeline must never produce silently.
+        entry.status = reconciliation?.incomplete ? "incomplete" : "completed";
+        if (reconciliation?.incomplete) {
+          entry.error =
+            `Reconciliation did not finish (final aggregation status: ${reconciliation.finalJob?.status ?? "unknown"}` +
+            `${reconciliation.finalJob?.errorMessage ? `, ${reconciliation.finalJob.errorMessage}` : ""}). ` +
+            `Most often this is waitMs being too short for an aggregator digesting every participant's findings — raise waitMs, or lower replicas/lenses so there is less to digest.`;
+          console.error(`[opencode-mcp] sweep segment ${seg.index + 1}: ${entry.error}`);
+        }
         entry.report = reconciliation?.report ?? null;
         entry.findings = reconciliation?.findings ?? [];
         entry.tokens = reconciliation?.finalJob?.tokens ?? null;
@@ -488,13 +501,21 @@ export function planSweep(opts) {
   });
   const segments = planSegments(discovery.files, budgetTokens);
   const replicas = Math.max(2, opts.replicas ?? 2);
-  const perSegmentJobs = lenses.length * replicas * (1 + (opts.depth ?? 1)) + 1 + (opts.depth ?? 1);
+  const depthVal = opts.depth ?? 1;
+  const groupSize = Math.max(2, opts.groupSize ?? 4); // must match orchestrate.js's DEFAULT_GROUP_SIZE
+  const participantCount = lenses.length * replicas;
+  // Aggregator calls to reduce N leaves with branching factor `groupSize` in a
+  // balanced tree = ceil((N-1)/(groupSize-1)) — one such reduction for the
+  // round-0 aggregation, and one more per adversarial depth round.
+  const treeCallsPerReduction = participantCount > 1 ? Math.ceil((participantCount - 1) / (groupSize - 1)) : 1;
+  const perSegmentJobs = participantCount * (1 + depthVal) + (1 + depthVal) * treeCallsPerReduction;
   return {
     dir: cwd,
     lenses: lenses.map((l) => l.key),
     unknownLenses: unknown,
     replicas,
-    depth: opts.depth ?? 1,
+    depth: depthVal,
+    groupSize,
     budgetTokens,
     projectContextFile: loadProjectContext({ dir: cwd, contextFile: opts.contextFile })?.path ?? null,
     fileCount: discovery.files.length,

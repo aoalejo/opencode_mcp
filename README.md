@@ -406,14 +406,14 @@ Both fan N participants out **in parallel**, all forced onto `mcp-readonly`
 (a real permission-engine guarantee, not a prompt asking nicely), then run
 them through the same confidence-ranked reconciliation:
 
-1. **Round 0**: N participants' independent findings go to ONE aggregator,
-   which builds a single report and explicitly notes how many participants
-   corroborated each finding — 2+ is CONFIRMED, exactly 1 is LOW CONFIDENCE.
+1. **Round 0**: N participants' independent findings are reconciled into ONE
+   report that explicitly notes how many participants corroborated each
+   finding — 2+ is CONFIRMED, exactly 1 is LOW CONFIDENCE.
 2. **Adversarial round(s)** (`depth` times, default 1): a FRESH batch of N
    reviewers gets ONLY the current report, framed as "a low-confidence agent
    reported this, your job is to determine its falseness" — each
    independently tries to refute the low-confidence items using its own
-   read-only access to the real code. One more aggregator then reconciles
+   read-only access to the real code. The results are reconciled into
    [previous report + all adversarial reviews], promoting survivors to
    "adversarially confirmed" and calling out (never silently dropping)
    anything refuted. `depth=0` skips this; `depth=2` repeats the whole
@@ -421,12 +421,44 @@ them through the same confidence-ranked reconciliation:
 
 `opencode_audit` reviews a git diff — uncommitted changes by default, or
 everything since `baseCommit` (a whole branch/PR) when given. If the diff is
-too large (~100k+ tokens) to hand every participant in full, participants
-each get a distinct subset of the changed files instead. Each participant is
-also assigned a rotating "lens" (correctness, security, simplification,
-efficiency, tests, consistency, error handling, readability) so N reviews of
-the *same* diff under the *same* (often deterministic, local) model actually
-diverge instead of producing near-duplicate output.
+too large (~100k+ tokens) to hand every participant, every reviewer gets the
+same bounded prefix plus the paths left out (they have read access and can
+open those themselves) — see "QA lenses" above for how reviewers are actually
+assigned and diversified; this replaced an older per-file partitioning scheme
+that broke once `replicas` meant reviewers sharing a lens must see identical
+content for their agreement to mean anything.
+
+### Hierarchical aggregation (tree reduction, `groupSize`)
+
+"ONE aggregator" above is a simplification for small N. Both reconciliation
+steps (round 0, and each adversarial reaggregation) actually run through a
+**tree** of aggregator calls, each combining at most `groupSize` sources
+(default 4) — not one aggregator reading every participant's output at once.
+
+This exists because a flat aggregator's prompt scales with participant count
+× however verbose each one felt like being. Observed 2026-08-22: 12 lenses ×
+2 replicas (24 participants, ~7k chars each) produced a **162,000-character**
+aggregator prompt that outran a 5-minute wait entirely — the local model
+never got through it, and the whole review silently came back as an empty
+report. Two fixes landed together:
+
+- A hard per-source cap (6,000 chars) on what reaches any single aggregator
+  call — a participant that rambles past this is truncated, not allowed to
+  starve the rest.
+- The tree reduction itself: leaf-level groups of `groupSize` participants
+  each get reconciled into a partial report IN PARALLEL (they're independent
+  — this also cuts wall-clock time, not just risk), then those partial
+  reports are merged in the same way, recursively, until one report remains.
+  Merge-level prompts are told explicitly to **add up** corroboration counts
+  across partials rather than trust each partial's count as final — a
+  finding at 2-of-4 in one partial and 1-of-4 in another is 3-of-8 combined,
+  which is CONFIRMED overall even though neither partial alone reached 2.
+
+Lower `groupSize` if aggregation still times out or comes back empty at a
+high `replicas`/lens count; raise it to trade fewer, larger aggregator calls
+for less merge overhead. This also means `opencode_sweep`'s per-segment
+reconciliation scales with lens/replica count more gracefully than a flat
+aggregator ever could.
 
 `opencode_investigate` is the same shape driven by an arbitrary `prompt`
 instead of a diff — use it to have several independent agents look into one

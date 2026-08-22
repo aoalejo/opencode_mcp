@@ -25,6 +25,7 @@ import { readUsageLog, summarizeUsage } from "./usage.js";
 import { runAudit, runInvestigate, runGoal, runJob, MAX_PARTICIPANTS } from "./orchestrate.js";
 import { ALL_LENS_KEYS, DEFAULT_LENS_KEYS, MIN_REPLICAS } from "./lenses.js";
 import { runSweep, planSweep, loadSweep, listSweeps } from "./sweep.js";
+import { tableOfContents, findSection, fullReadme } from "./help.js";
 
 /**
  * Mark a tier's final winner as `inherited` when a strictly cheaper tier's
@@ -121,6 +122,30 @@ function ok(data) {
 function err(message) {
   return { content: [{ type: "text", text: message }], isError: true };
 }
+
+server.tool(
+  "opencode_help",
+  `Read this server's own README — the design rationale, gotchas, and exact usage instructions for every tool here (including the handoff prompt this repo's own docs give for briefing ANOTHER agent to run opencode_sweep on an unfamiliar project). This is the authoritative source; don't guess at a tool's behavior from its name or from memory of an earlier session — a detail like "why does opencode_goal run sequentially" or "how does the mcp-readonly agent get set up" lives here, not in the tool descriptions.\n\nCall with no arguments first — it returns a table of contents (every heading plus a one-line teaser), costing almost nothing. Then call again with \`section\` matching (even loosely — "sweep", "pin a model", "lens replicas" all resolve) the heading you need; you get back just that section's full text, including its subsections. Pass \`full: true\` only if you genuinely need the entire document at once (it's long).`,
+  {
+    section: z.string().optional().describe('A heading to fetch, matched loosely (case/backtick/substring/word-overlap insensitive) — e.g. "sweep", "pinning a model", "lens replicas". Omit (with `full` also omitted) to get the table of contents instead.'),
+    full: z.boolean().optional().describe("Return the entire README verbatim instead of one section. Default false."),
+  },
+  async ({ section, full }) => {
+    try {
+      if (full) return ok({ readme: fullReadme() });
+      if (!section) return ok({ tableOfContents: tableOfContents() });
+      const { match, suggestions } = findSection(section);
+      if (match) return ok({ title: match.title, content: match.content });
+      return err(
+        suggestions.length
+          ? `No single section matched "${section}". Closest headings: ${suggestions.join(" | ")}`
+          : `No section matched "${section}" and no close headings were found. Call opencode_help with no arguments to see the table of contents.`
+      );
+    } catch (e) {
+      return err(String(e.message ?? e));
+    }
+  }
+);
 
 server.tool(
   "opencode_list_providers",
@@ -497,11 +522,12 @@ server.tool(
     variant: z.string().optional().describe("Reasoning-effort variant to pair with an explicit model."),
     waitMs: z.number().int().min(1000).max(540000).optional().describe(`Per-job wait cap. Default ${ORCHESTRATION_WAIT_MS}.`),
     depth: z.number().int().min(0).max(3).optional().describe(`Adversarial-round-then-reaggregate repetitions (default 1). 0 skips adversarial verification entirely (fastest/cheapest); 1 = one round; 2 = two rounds for higher-criticality reviews (more rigor, more cost).`),
+    groupSize: z.number().int().min(2).optional().describe("How many sources (participant findings, or adversarial reviews) each single aggregator call digests before its output is merged with sibling groups' — a TREE reduction instead of one aggregator reading every participant at once. Default 4. Lower this if you have many replicas/lenses and see aggregation timing out or coming back empty (a flat aggregator's prompt scales with participant count x output length); raising it trades fewer, larger aggregator calls for less merge overhead. Leaf-level groups run in parallel regardless of this value."),
     verbose: z.boolean().optional().describe("Default false: participants carry only status/tokens/cost, never the underlying prompt. Set true to also include each participant's own raw findings text — useful for debugging the reconciliation, not needed for normal use."),
   },
-  async ({ count, replicas, lenses, contextFile, dir, baseCommit, focus, tier, model, variant, waitMs, depth, verbose }) => {
+  async ({ count, replicas, lenses, groupSize, contextFile, dir, baseCommit, focus, tier, model, variant, waitMs, depth, verbose }) => {
     try {
-      return ok(await runAudit({ count, replicas, lenses, contextFile, dir, baseCommit, focus, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS, depth: depth ?? 1, verbose: verbose ?? false }));
+      return ok(await runAudit({ count, replicas, lenses, groupSize, contextFile, dir, baseCommit, focus, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS, depth: depth ?? 1, verbose: verbose ?? false }));
     } catch (e) {
       return err(String(e.message ?? e));
     }
@@ -520,11 +546,12 @@ server.tool(
     variant: z.string().optional().describe("Reasoning-effort variant to pair with an explicit model."),
     waitMs: z.number().int().min(1000).max(540000).optional().describe(`Per-job wait cap. Default ${ORCHESTRATION_WAIT_MS}.`),
     depth: z.number().int().min(0).max(3).optional().describe(`Adversarial-round-then-reaggregate repetitions (default 1). 0 skips adversarial verification entirely (fastest/cheapest); 1 = one round; 2 = two rounds for higher-criticality investigations (more rigor, more cost).`),
+    groupSize: z.number().int().min(2).optional().describe("How many sources each single aggregator call digests before merging with sibling groups — a tree reduction instead of one aggregator reading every participant at once. Default 4."),
     verbose: z.boolean().optional().describe("Default false: participants carry only status/tokens/cost, never the underlying prompt. Set true to also include each participant's own raw findings text."),
   },
-  async ({ prompt, count, dir, tier, model, variant, waitMs, depth, verbose }) => {
+  async ({ prompt, count, groupSize, dir, tier, model, variant, waitMs, depth, verbose }) => {
     try {
-      return ok(await runInvestigate({ prompt, count, dir, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS, depth: depth ?? 1, verbose: verbose ?? false }));
+      return ok(await runInvestigate({ prompt, count, groupSize, dir, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS, depth: depth ?? 1, verbose: verbose ?? false }));
     } catch (e) {
       return err(String(e.message ?? e));
     }
@@ -601,6 +628,7 @@ server.tool(
     lenses: z.union([z.literal("all"), z.array(z.enum(ALL_LENS_KEYS))]).optional().describe(`Which QA lenses to run. Omit for the 6 core lenses; "all" for every lens (${ALL_LENS_KEYS.length} total); or an explicit subset.`),
     replicas: z.number().int().min(MIN_REPLICAS).optional().describe(`Independent reviewers per lens, per segment. Default ${MIN_REPLICAS}, minimum ${MIN_REPLICAS}. Multiplies total runtime — check the \`plan\` estimate before raising it.`),
     depth: z.number().int().min(0).max(3).optional().describe("Adversarial verification rounds per segment (default 1). 0 is much faster and much noisier across a whole repo; 1 is the sane default here."),
+    groupSize: z.number().int().min(2).optional().describe("How many participant/adversary outputs each single aggregator call digests before merging with sibling groups — a tree reduction instead of one aggregator reading everyone at once. Default 4. Lower this if segments come back with an empty report (the flat aggregator's prompt scales with lenses x replicas x output length and can outrun waitMs at high replica counts)."),
     budgetTokens: z.number().int().min(4000).optional().describe("Approx token budget per segment (default 40000). Lower = more, smaller segments = slower but more focused."),
     includeGlobs: z.array(z.string()).optional().describe('Restrict the sweep to paths matching these globs, e.g. ["lib/**", "src/**"]. Supports ** and *.'),
     excludeGlobs: z.array(z.string()).optional().describe("Extra globs to exclude, on top of the built-in vendor/build/generated/lockfile defaults."),
@@ -614,9 +642,9 @@ server.tool(
     variant: z.string().optional().describe("Reasoning-effort variant to pair with an explicit model."),
     waitMs: z.number().int().min(1000).max(540000).optional().describe(`Per-JOB wait cap (not per sweep). Default ${ORCHESTRATION_WAIT_MS}.`),
   },
-  async ({ plan, dir, lenses, replicas, depth, budgetTokens, includeGlobs, excludeGlobs, sourceExtensions, skipGeneratedSniff, maxSegments, contextFile, focus, tier, model, variant, waitMs }) => {
+  async ({ plan, dir, lenses, replicas, depth, groupSize, budgetTokens, includeGlobs, excludeGlobs, sourceExtensions, skipGeneratedSniff, maxSegments, contextFile, focus, tier, model, variant, waitMs }) => {
     try {
-      const common = { dir, lenses, replicas, depth: depth ?? 1, budgetTokens, includeGlobs, excludeGlobs, sourceExtensions, skipGeneratedSniff, maxSegments, contextFile, focus, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS };
+      const common = { dir, lenses, replicas, depth: depth ?? 1, groupSize, budgetTokens, includeGlobs, excludeGlobs, sourceExtensions, skipGeneratedSniff, maxSegments, contextFile, focus, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS };
       if (plan) return ok({ plan: true, ...planSweep(common) });
 
       const preview = planSweep(common);
