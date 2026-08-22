@@ -303,6 +303,33 @@ is active (and what it's pinned to) is visible in `opencode_check_go_status`'s
 this way* — concurrent sessions each run their own server process with their
 own env, so this isn't a machine-wide setting.
 
+## Matching the concurrency ceiling to your backend (`OPENCODE_MCP_MAX_CONCURRENCY`)
+
+`opencode_audit`/`opencode_investigate`/`opencode_sweep` fan participants out
+through a rolling-window concurrency limiter, not fixed batches — as soon as
+any one job finishes, the next queued one starts immediately, rather than
+waiting for a whole wave to complete before starting the next. The ceiling on
+how many run at once defaults to a conservative `4`, since this server has no
+way to know what your actual model backend can serve. If yours can genuinely
+handle more — e.g. a local multi-agent-capable server advertising a real
+concurrency limit of 16 — set that once at registration instead of passing
+`maxConcurrency` on every call:
+
+```bash
+claude mcp add opencode --scope user \
+  --env OPENCODE_MCP_MAX_CONCURRENCY=16 \
+  -- node /path/to/opencode-mcp/src/index.js
+```
+
+A per-call `maxConcurrency` param still overrides this for one specific tool
+call. The effective default is visible in `opencode_check_go_status`'s
+`defaultMaxConcurrency` field. Getting this wrong in either direction has a
+real cost: too low and you leave real backend capacity idle for no reason;
+too high and you get exactly the failure mode this setting exists to prevent
+— observed 2026-08-22, a sweep at `replicas:4` (48 concurrent participants)
+against a backend that couldn't actually serve that many ran 5h42m without a
+single segment completing.
+
 ## Multi-agent orchestration: audit / investigate / goal / job (`src/orchestrate.js`)
 
 One model call is one opinion. These four tools spend extra parallel calls —

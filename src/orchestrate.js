@@ -329,7 +329,19 @@ function trimJob(summary, { keepText = false } = {}) {
 // rejecting a request under load). This is the actual fix for that; the
 // per-source truncation and groupSize tree-reduction (see below) bound
 // prompt SIZE, but did nothing about request VOLUME.
-const DEFAULT_MAX_CONCURRENCY = 4;
+//
+// The conservative literal default (4) is a guess about a backend we know
+// nothing about. `OPENCODE_MCP_MAX_CONCURRENCY`, set once at server
+// registration time (same pattern as OPENCODE_MCP_PIN_MODEL), lets it
+// reflect what your actual backend can serve instead — e.g. a local
+// multi-agent-capable server advertising a real concurrency ceiling of 16
+// should set that, not eat 4x the wall-clock time for no reason. A per-call
+// `maxConcurrency` param still overrides this on any individual tool call.
+export function resolveDefaultMaxConcurrency() {
+  const envVal = Number(process.env.OPENCODE_MCP_MAX_CONCURRENCY);
+  return Number.isInteger(envVal) && envVal > 0 ? envVal : 4;
+}
+const DEFAULT_MAX_CONCURRENCY = resolveDefaultMaxConcurrency();
 
 /**
  * Run `worker(item, index)` over `items` with at most `limit` concurrently

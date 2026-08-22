@@ -22,7 +22,7 @@ import {
 } from "./tiers.js";
 import { computeTierMap } from "./rank.js";
 import { readUsageLog, summarizeUsage } from "./usage.js";
-import { runAudit, runInvestigate, runGoal, runJob, MAX_PARTICIPANTS } from "./orchestrate.js";
+import { runAudit, runInvestigate, runGoal, runJob, MAX_PARTICIPANTS, resolveDefaultMaxConcurrency } from "./orchestrate.js";
 import { ALL_LENS_KEYS, DEFAULT_LENS_KEYS, MIN_REPLICAS } from "./lenses.js";
 import { runSweep, planSweep, loadSweep, listSweeps, requestSweepCancel } from "./sweep.js";
 import { tableOfContents, findSection, fullReadme } from "./help.js";
@@ -190,7 +190,7 @@ server.tool(
 
 server.tool(
   "opencode_check_go_status",
-  "Check the OpenCode Go subscription: confirms the credential is configured and lists the opencode-go models currently on offer (availability/lineup can change). Pass probe:true to also send a trivial ping to the mid/high/max tier models and confirm they're actually responding right now — that costs a small amount of tokens/time, so only do it when you're about to rely on the result (e.g. before delegating a big job), not as a routine check.",
+  "Check the OpenCode Go subscription: confirms the credential is configured and lists the opencode-go models currently on offer (availability/lineup can change). Pass probe:true to also send a trivial ping to the mid/high/max tier models and confirm they're actually responding right now — that costs a small amount of tokens/time, so only do it when you're about to rely on the result (e.g. before delegating a big job), not as a routine check. `defaultMaxConcurrency` reports the concurrency ceiling opencode_audit/opencode_investigate/opencode_sweep fall back to when a call doesn't pass its own `maxConcurrency` — set once at server registration via OPENCODE_MCP_MAX_CONCURRENCY to match what your actual model backend can serve (see README).",
   {
     probe: z
       .boolean()
@@ -211,6 +211,7 @@ server.tool(
         tierMapMeta: getTierMapMeta(),
         blocked: listBlocked(),
         pinnedModel: pinnedModel(),
+        defaultMaxConcurrency: resolveDefaultMaxConcurrency(),
       };
 
       if (probe && subscriptionConfigured) {
@@ -523,7 +524,7 @@ server.tool(
     waitMs: z.number().int().min(1000).max(540000).optional().describe(`Per-job wait cap. Default ${ORCHESTRATION_WAIT_MS}.`),
     depth: z.number().int().min(0).max(3).optional().describe(`Adversarial-round-then-reaggregate repetitions (default 1). 0 skips adversarial verification entirely (fastest/cheapest); 1 = one round; 2 = two rounds for higher-criticality reviews (more rigor, more cost).`),
     groupSize: z.number().int().min(2).optional().describe("How many sources (participant findings, or adversarial reviews) each single aggregator call digests before its output is merged with sibling groups' — a TREE reduction instead of one aggregator reading every participant at once. Default 4. Lower this if you have many replicas/lenses and see aggregation timing out or coming back empty (a flat aggregator's prompt scales with participant count x output length); raising it trades fewer, larger aggregator calls for less merge overhead. Leaf-level groups run in parallel regardless of this value."),
-    maxConcurrency: z.number().int().min(1).optional().describe("Max opencode processes running AT ONCE against the model backend, regardless of total participant/replica count. Default 4. This is the actual fix for aggregation timing out at high replica counts — groupSize bounds prompt SIZE, this bounds request VOLUME; a single local backend serving 40+ simultaneous requests just queues them, and queueing time (not prompt size) is what blows through waitMs. Lower it further if you're seeing 'Unexpected server error' responses (backend overload) or a local model that's otherwise being used for other things at the same time."),
+    maxConcurrency: z.number().int().min(1).optional().describe("Max opencode processes running AT ONCE against the model backend, regardless of total participant/replica count. Default 4, or OPENCODE_MCP_MAX_CONCURRENCY if set at server registration (see README) — set that once to your backend's real capacity instead of passing this on every call. This is the actual fix for aggregation timing out at high replica counts — groupSize bounds prompt SIZE, this bounds request VOLUME; a single local backend serving 40+ simultaneous requests just queues them, and queueing time (not prompt size) is what blows through waitMs. Lower it further if you're seeing 'Unexpected server error' responses (backend overload) or a local model that's otherwise being used for other things at the same time."),
     verbose: z.boolean().optional().describe("Default false: participants carry only status/tokens/cost, never the underlying prompt. Set true to also include each participant's own raw findings text — useful for debugging the reconciliation, not needed for normal use."),
   },
   async ({ count, replicas, lenses, groupSize, maxConcurrency, contextFile, dir, baseCommit, focus, tier, model, variant, waitMs, depth, verbose }) => {
@@ -548,7 +549,7 @@ server.tool(
     waitMs: z.number().int().min(1000).max(540000).optional().describe(`Per-job wait cap. Default ${ORCHESTRATION_WAIT_MS}.`),
     depth: z.number().int().min(0).max(3).optional().describe(`Adversarial-round-then-reaggregate repetitions (default 1). 0 skips adversarial verification entirely (fastest/cheapest); 1 = one round; 2 = two rounds for higher-criticality investigations (more rigor, more cost).`),
     groupSize: z.number().int().min(2).optional().describe("How many sources each single aggregator call digests before merging with sibling groups — a tree reduction instead of one aggregator reading every participant at once. Default 4."),
-    maxConcurrency: z.number().int().min(1).optional().describe("Max opencode processes running AT ONCE against the model backend, regardless of total participant count. Default 4 — the actual fix for aggregation timing out at high counts (groupSize bounds prompt size, this bounds request volume against a backend that can't usefully serve many requests at once)."),
+    maxConcurrency: z.number().int().min(1).optional().describe("Max opencode processes running AT ONCE against the model backend, regardless of total participant count. Default 4, or OPENCODE_MCP_MAX_CONCURRENCY if set at server registration (see README). The actual fix for aggregation timing out at high counts (groupSize bounds prompt size, this bounds request volume against a backend that can't usefully serve many requests at once)."),
     verbose: z.boolean().optional().describe("Default false: participants carry only status/tokens/cost, never the underlying prompt. Set true to also include each participant's own raw findings text."),
   },
   async ({ prompt, count, groupSize, maxConcurrency, dir, tier, model, variant, waitMs, depth, verbose }) => {
@@ -632,7 +633,7 @@ server.tool(
     replicas: z.number().int().min(MIN_REPLICAS).optional().describe(`Independent reviewers per lens, per segment. Default ${MIN_REPLICAS}, minimum ${MIN_REPLICAS}. Multiplies total runtime — check the \`plan\` estimate before raising it.`),
     depth: z.number().int().min(0).max(3).optional().describe("Adversarial verification rounds per segment (default 1). 0 is much faster and much noisier across a whole repo; 1 is the sane default here."),
     groupSize: z.number().int().min(2).optional().describe("How many participant/adversary outputs each single aggregator call digests before merging with sibling groups — a tree reduction instead of one aggregator reading everyone at once. Default 4. Lower this if segments come back with an empty report (the flat aggregator's prompt scales with lenses x replicas x output length and can outrun waitMs at high replica counts)."),
-    maxConcurrency: z.number().int().min(1).optional().describe("Max opencode processes running AT ONCE per segment, regardless of lenses x replicas. Default 4. This is the actual fix for a segment's aggregation never finishing at high replica counts: groupSize bounds prompt SIZE, this bounds request VOLUME against the model backend — a local server serving 40+ simultaneous requests just queues them, and that queueing (not prompt size) is what exhausts waitMs. Observed 2026-08-22: replicas:4 (48 participants/segment) with the default concurrency produced 21/21 segments incomplete or failed over 5h42m; lowering this is the fix, not raising waitMs."),
+    maxConcurrency: z.number().int().min(1).optional().describe("Max opencode processes running AT ONCE per segment, regardless of lenses x replicas. Default 4, or OPENCODE_MCP_MAX_CONCURRENCY if set at server registration (see README). This is the actual fix for a segment's aggregation never finishing at high replica counts: groupSize bounds prompt SIZE, this bounds request VOLUME against the model backend — a local server serving 40+ simultaneous requests just queues them, and that queueing (not prompt size) is what exhausts waitMs. Observed 2026-08-22: replicas:4 (48 participants/segment) with the default concurrency produced 21/21 segments incomplete or failed over 5h42m; lowering this is the fix, not raising waitMs."),
     budgetTokens: z.number().int().min(4000).optional().describe("Approx token budget per segment (default 40000). Lower = more, smaller segments = slower but more focused."),
     includeGlobs: z.array(z.string()).optional().describe('Restrict the sweep to paths matching these globs, e.g. ["lib/**", "src/**"]. Supports ** and *.'),
     excludeGlobs: z.array(z.string()).optional().describe("Extra globs to exclude, on top of the built-in vendor/build/generated/lockfile defaults."),
