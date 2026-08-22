@@ -331,17 +331,18 @@ function trimJob(summary, { keepText = false } = {}) {
 // prompt SIZE, but did nothing about request VOLUME.
 //
 // The conservative literal default (4) is a guess about a backend we know
-// nothing about. `OPENCODE_MCP_MAX_CONCURRENCY`, set once at server
-// registration time (same pattern as OPENCODE_MCP_PIN_MODEL), lets it
-// reflect what your actual backend can serve instead — e.g. a local
-// multi-agent-capable server advertising a real concurrency ceiling of 16
-// should set that, not eat 4x the wall-clock time for no reason. A per-call
-// `maxConcurrency` param still overrides this on any individual tool call.
+// nothing about. `OPENCODE_MCP_MAX_CONCURRENCY` lets it reflect what your
+// actual backend can serve instead — e.g. a local multi-agent-capable server
+// advertising a real concurrency ceiling of 16 should use that, not eat 4x
+// the wall-clock time for no reason. Deliberately re-read on EVERY call
+// (never cached into a frozen module-level constant) — `maxConcurrency` is
+// itself a per-call param, and this is just its fallback when omitted, so
+// the whole chain stays "pass it fresh each time → env var → 4" with nothing
+// baked in at server startup that would need a restart to change.
 export function resolveDefaultMaxConcurrency() {
   const envVal = Number(process.env.OPENCODE_MCP_MAX_CONCURRENCY);
   return Number.isInteger(envVal) && envVal > 0 ? envVal : 4;
 }
-const DEFAULT_MAX_CONCURRENCY = resolveDefaultMaxConcurrency();
 
 /**
  * Run `worker(item, index)` over `items` with at most `limit` concurrently
@@ -388,7 +389,7 @@ function cancelIfStillRunning(summary) {
 }
 
 /**
- * Fan `count` jobs out with bounded concurrency (see DEFAULT_MAX_CONCURRENCY),
+ * Fan `count` jobs out with bounded concurrency (see resolveDefaultMaxConcurrency),
  * all pinned to the same resolved model+variant and forced onto
  * READONLY_AGENT so "solo lectura forzado" is an actual permission-engine
  * guarantee, not a prompt request a model could ignore. Returns each
@@ -398,7 +399,7 @@ function cancelIfStillRunning(summary) {
  */
 async function runReadOnlyBatch({ count, buildPrompt, dir, model, variant, tier, waitMs, titlePrefix, maxConcurrency, isCancelled }) {
   const resolved = resolveModel({ model, variant, tier });
-  const limit = Math.max(1, Number.isInteger(maxConcurrency) ? maxConcurrency : DEFAULT_MAX_CONCURRENCY);
+  const limit = Math.max(1, Number.isInteger(maxConcurrency) ? maxConcurrency : resolveDefaultMaxConcurrency());
   const indices = Array.from({ length: count }, (_, i) => i);
   const results = await mapWithConcurrency(
     indices,
@@ -500,7 +501,7 @@ function chunkEvenly(arr, maxSize) {
  */
 async function reduceSources({ sources, preface, leafInstructions, mergeInstructions, groupSize, dir, model, variant, tier, waitMs, titlePrefix, maxConcurrency, isCancelled }) {
   const size = Math.max(2, Number.isInteger(groupSize) ? groupSize : DEFAULT_GROUP_SIZE);
-  const limit = Math.max(1, Number.isInteger(maxConcurrency) ? maxConcurrency : DEFAULT_MAX_CONCURRENCY);
+  const limit = Math.max(1, Number.isInteger(maxConcurrency) ? maxConcurrency : resolveDefaultMaxConcurrency());
   const levels = [];
   let current = sources;
   let isLeaf = true;

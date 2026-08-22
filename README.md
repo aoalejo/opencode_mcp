@@ -321,14 +321,18 @@ claude mcp add opencode --scope user \
   -- node /path/to/opencode-mcp/src/index.js
 ```
 
-A per-call `maxConcurrency` param still overrides this for one specific tool
-call. The effective default is visible in `opencode_check_go_status`'s
-`defaultMaxConcurrency` field. Getting this wrong in either direction has a
-real cost: too low and you leave real backend capacity idle for no reason;
-too high and you get exactly the failure mode this setting exists to prevent
-— observed 2026-08-22, a sweep at `replicas:4` (48 concurrent participants)
-against a backend that couldn't actually serve that many ran 5h42m without a
-single segment completing.
+The full chain is: **`maxConcurrency` passed on that specific call** → **the
+env var** → **4**. Nothing in it is cached at server startup — the env var is
+read fresh on every single dispatch, not baked into a frozen default the
+moment this process boots. That mostly matters for the ordinary case: pass
+`maxConcurrency` directly on any call whenever you want to change the ceiling
+right now, no server restart needed either way. The effective fallback is
+visible in `opencode_check_go_status`'s `defaultMaxConcurrency` field.
+Getting this wrong in either direction has a real cost: too low and you leave
+real backend capacity idle for no reason; too high and you get exactly the
+failure mode this setting exists to prevent — observed 2026-08-22, a sweep at
+`replicas:4` (48 concurrent participants) against a backend that couldn't
+actually serve that many ran 5h42m without a single segment completing.
 
 ## Multi-agent orchestration: audit / investigate / goal / job (`src/orchestrate.js`)
 
