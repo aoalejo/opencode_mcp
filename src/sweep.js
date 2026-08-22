@@ -524,6 +524,18 @@ export function planSweep(opts) {
     estimatedJobs: segments.length * perSegmentJobs,
     skipped: discovery.skipped,
     generatedSample: discovery.generatedFiles.slice(0, 20),
-    segments: segments.map((s) => ({ index: s.index, fileCount: s.files.length, approxTokens: s.approxTokens, oversized: Boolean(s.oversized), files: s.files.map((f) => f.path) })),
+    // Per-segment file PATHS are omitted by default — observed 2026-08-22, a
+    // 3,126-file/138-segment repo turned this into a 234,000-character
+    // response, when the useful part of a plan is the ~15 summary fields
+    // above. Pass `verbose: true` to get every segment's exact file list
+    // back (e.g. to confirm one segment's membership after tuning filters);
+    // otherwise use `fileSample` on a handful of segments as a spot check.
+    segments: segments.map((s) => ({
+      index: s.index,
+      fileCount: s.files.length,
+      approxTokens: s.approxTokens,
+      oversized: Boolean(s.oversized),
+      ...(opts.verbose ? { files: s.files.map((f) => f.path) } : { fileSample: s.files.slice(0, 3).map((f) => f.path) }),
+    })),
   };
 }

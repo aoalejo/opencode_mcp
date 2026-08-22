@@ -506,6 +506,33 @@ async function reduceSources({ sources, preface, leafInstructions, mergeInstruct
 async function reconcileRecursive({ participants, context, depth, count, dir, model, variant, tier, waitMs, emitFindingsBlock = false, groupSize }) {
   const depthVal = clampDepth(depth);
   const rounds = [];
+
+  // If NONE of the participants produced anything, refuse to hand the
+  // aggregator a wall of "[failed] (no output)" placeholders. The aggregator
+  // is itself a real agent with its own read/grep/glob access — observed
+  // 2026-08-22, given nothing but failures it quietly went and redid the
+  // whole investigation from scratch and returned what looked like a normal,
+  // well-corroborated report. That's worse than an honest failure: every
+  // participant died (all 3, killed by signal with zero diagnostic trail
+  // before the fix in jobs.js), the swarm's entire redundancy/corroboration
+  // guarantee evaporated, and nothing in the output said so — a caller
+  // checking only `reconciliation.report` would see a plausible, even
+  // accurate-looking answer and never know it came from a single agent's own
+  // exploration instead of a reconciled multi-agent review.
+  const succeeded = participants.filter((p) => p.status === "completed" && (p.text || "").trim());
+  if (succeeded.length === 0) {
+    const errors = participants.map((p, i) => `  ${i + 1}. [${p.status}] ${p.errorMessage ?? "(no error message)"}`).join("\n");
+    return {
+      report: "",
+      findings: [],
+      refuted: [],
+      depth: depthVal,
+      rounds: [],
+      finalJob: { status: "failed", errorMessage: `All ${participants.length} participants failed before producing output — refusing to aggregate a wall of failures. Individual errors:\n${errors}` },
+      incomplete: true,
+    };
+  }
+
   // Only the LAST aggregation emits the machine-readable block — asking every
   // round for it would just be parsed and thrown away until the final one.
   const blockIf = (isFinal) => (emitFindingsBlock && isFinal ? FINDINGS_BLOCK_INSTRUCTION : "");

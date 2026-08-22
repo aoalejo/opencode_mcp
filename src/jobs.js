@@ -153,7 +153,7 @@ export function startJob(opts) {
   // both arrive (the normal case — usually milliseconds apart).
   let settled = false;
   let settledAt = null;
-  function finalize(code, via) {
+  function finalize(code, via, signal) {
     if (settled) {
       // The other event still arrived eventually — log the gap so we have
       // real production evidence of how often/how badly this actually
@@ -169,6 +169,22 @@ export function startJob(opts) {
     settledAt = Date.now();
     job.exitCode = code;
     job.finishedAt = Date.now();
+    // `code` is null (not 0) when the process was killed by a signal rather
+    // than exiting on its own (Node's exit event is (code, signal), and this
+    // used to silently discard signal) — that produced a "failed" job with
+    // exitCode:null, errorMessage:null, zero tokens, and NO indication of
+    // why. Observed 2026-08-22: a whole opencode_investigate swarm's 3
+    // participants all died this way (likely a saturated/restarting local
+    // model dropping their connections) with zero diagnostic trail, and the
+    // aggregator — itself a real agent with read access — quietly redid the
+    // investigation from scratch instead of surfacing the total failure, so
+    // the swarm's redundancy/corroboration guarantee silently evaporated
+    // behind an apparently-successful report. Recording the signal here is
+    // what lets a caller actually notice and explain this instead of
+    // guessing "failed, no reason given."
+    if (signal && !job.errorMessage) {
+      job.errorMessage = `Process was killed by signal ${signal} before finishing (not a normal exit) — often caused by the model backend dropping the connection, an OOM kill, or something external terminating the process.`;
+    }
     if (job.status === "running") {
       job.status = code === 0 && !job.errorMessage ? "completed" : "failed";
     }
@@ -182,8 +198,8 @@ export function startJob(opts) {
     }
     job.events.emit("done");
   }
-  child.on("exit", (code) => finalize(code, "exit"));
-  child.on("close", (code) => finalize(code, "close"));
+  child.on("exit", (code, signal) => finalize(code, "exit", signal));
+  child.on("close", (code, signal) => finalize(code, "close", signal));
   child.on("error", (err) => {
     job.errorMessage = err.message;
     finalize(job.exitCode ?? 1, "error");

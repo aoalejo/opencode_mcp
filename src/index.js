@@ -625,6 +625,7 @@ server.tool(
   {
     dir: z.string().optional().describe("Absolute path of the repo to sweep. Defaults to this server's cwd."),
     plan: z.boolean().optional().describe("If true, spawn NOTHING — just return which files/segments would be reviewed plus a job estimate. Run this first, always."),
+    verbose: z.boolean().optional().describe("With `plan: true` only: include each segment's full file-path list. Default false — segments carry just fileCount/approxTokens plus a 3-file sample, since the full list on a large repo can be hundreds of KB on its own; ignored when `plan` is not set."),
     lenses: z.union([z.literal("all"), z.array(z.enum(ALL_LENS_KEYS))]).optional().describe(`Which QA lenses to run. Omit for the 6 core lenses; "all" for every lens (${ALL_LENS_KEYS.length} total); or an explicit subset.`),
     replicas: z.number().int().min(MIN_REPLICAS).optional().describe(`Independent reviewers per lens, per segment. Default ${MIN_REPLICAS}, minimum ${MIN_REPLICAS}. Multiplies total runtime — check the \`plan\` estimate before raising it.`),
     depth: z.number().int().min(0).max(3).optional().describe("Adversarial verification rounds per segment (default 1). 0 is much faster and much noisier across a whole repo; 1 is the sane default here."),
@@ -642,10 +643,10 @@ server.tool(
     variant: z.string().optional().describe("Reasoning-effort variant to pair with an explicit model."),
     waitMs: z.number().int().min(1000).max(540000).optional().describe(`Per-JOB wait cap (not per sweep). Default ${ORCHESTRATION_WAIT_MS}.`),
   },
-  async ({ plan, dir, lenses, replicas, depth, groupSize, budgetTokens, includeGlobs, excludeGlobs, sourceExtensions, skipGeneratedSniff, maxSegments, contextFile, focus, tier, model, variant, waitMs }) => {
+  async ({ plan, verbose, dir, lenses, replicas, depth, groupSize, budgetTokens, includeGlobs, excludeGlobs, sourceExtensions, skipGeneratedSniff, maxSegments, contextFile, focus, tier, model, variant, waitMs }) => {
     try {
       const common = { dir, lenses, replicas, depth: depth ?? 1, groupSize, budgetTokens, includeGlobs, excludeGlobs, sourceExtensions, skipGeneratedSniff, maxSegments, contextFile, focus, tier, model, variant, waitMs: waitMs ?? ORCHESTRATION_WAIT_MS };
-      if (plan) return ok({ plan: true, ...planSweep(common) });
+      if (plan) return ok({ plan: true, ...planSweep({ ...common, verbose }) });
 
       const preview = planSweep(common);
       if (!preview.segmentCount) {
@@ -683,22 +684,30 @@ server.tool(
 
 server.tool(
   "opencode_sweep_status",
-  "Check a sweep started with opencode_sweep. Returns progress (segments done / total), the accumulated confirmed-findings ledger, and the path to the full markdown report on disk (rewritten after every segment, so it's useful long before the sweep finishes). Reads from disk, so it works across a server restart or from a different session. Omit `sweepId` to list all known sweeps newest-first.",
+  "Check a sweep started with opencode_sweep. Returns progress (segments done / total), the accumulated confirmed-findings ledger, and the path to the full markdown report on disk (rewritten after every segment, so it's useful long before the sweep finishes). Reads from disk, so it works across a server restart or from a different session. Omit `sweepId` to list all known sweeps newest-first.\n\nDefault output is LEAN and built for repeated polling: a `segmentCounts` breakdown by status, plus a `segments` array containing ONLY segments that have actually started (never the still-`pending` ones — on a large sweep those are most of them and carry zero information until their turn comes). Pass `verbose: true` to also get every `pending` segment listed and each active segment's full reconciled report text.",
   {
     sweepId: z.string().optional().describe("The sweep to check. Omit to list every known sweep instead."),
-    verbose: z.boolean().optional().describe("Include each segment's full reconciled report text. Default false — the report file on disk already has all of it."),
+    verbose: z.boolean().optional().describe("Default false: segments array excludes still-pending segments, no report text. Set true to include pending segments too and each segment's full report text — the report file on disk already has all of it, so this is rarely needed."),
   },
   async ({ sweepId, verbose }) => {
     try {
       if (!sweepId) return ok({ sweeps: listSweeps() });
       const state = runningSweeps.get(sweepId) ?? loadSweep(sweepId);
       if (!state) return err(`No sweep with id "${sweepId}" (checked memory and ${"~/.local/share/opencode-mcp/sweeps"}).`);
+
+      const segmentCounts = state.segments.reduce(
+        (acc, s) => ({ ...acc, [s.status]: (acc[s.status] ?? 0) + 1 }),
+        { pending: 0, running: 0, completed: 0, incomplete: 0, failed: 0 }
+      );
+      const visibleSegments = verbose ? state.segments : state.segments.filter((s) => s.status !== "pending");
+
       return ok({
         sweepId: state.sweepId,
         dir: state.dir,
         status: state.status,
         completedSegments: state.completedSegments,
         totalSegments: state.totalSegments,
+        segmentCounts,
         fileCount: state.fileCount,
         lenses: state.lensKeys,
         replicas: state.replicas,
@@ -709,7 +718,7 @@ server.tool(
         finishedAt: state.finishedAt,
         error: state.error,
         confirmedFindings: state.ledger,
-        segments: state.segments.map((s) => ({
+        segments: visibleSegments.map((s) => ({
           index: s.index,
           status: s.status,
           fileCount: s.files.length,
